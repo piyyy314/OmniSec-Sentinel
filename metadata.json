@@ -1,0 +1,6 @@
+{
+  "name": "Quantum Sentinel AI (QSAI)",
+  "description": "The Chronos Cyber Defense Platform - A proactive, adaptive, and future-proof quantum-resilient defense ecosystem leveraging symbiotic AI, Post-Quantum Cryptography (PQC), and secure ledger anchoring.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
