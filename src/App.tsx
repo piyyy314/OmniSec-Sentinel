@@ -60,7 +60,12 @@ import {
   Workflow,
   Info,
   ShieldCheck,
-  CheckCircle2
+  CheckCircle2,
+  Gauge,
+  Flame,
+  Timer,
+  Server,
+  RotateCcw
 } from "lucide-react";
 import { 
   ResponsiveContainer, 
@@ -91,6 +96,124 @@ const CATEGORIES = [
   "Autonomous & Bio-Digital"
 ] as const;
 
+// Host node definitions and initial telemetry baselines for Attack Graph
+interface HostNodeInfo {
+  id: string;
+  name: string;
+  role: string;
+  ip: string;
+  initialUptimeSeconds: number;
+  baseUptimePercent: number;
+  baseLatency: number;
+  normalTrafficPps: number;
+  trafficThresholdPps: number;
+  protocol: string;
+  hardware: string;
+}
+
+const HOST_NODES: Record<string, HostNodeInfo> = {
+  "node-1": {
+    id: "node-1",
+    name: "Ingress Edge Gateway (GW1)",
+    role: "Perimeter Decryption & Zero-Trust Mesh Router",
+    ip: "10.0.1.1",
+    initialUptimeSeconds: 14 * 86400 + 6 * 3600 + 23 * 60 + 41,
+    baseUptimePercent: 99.98,
+    baseLatency: 1.25,
+    normalTrafficPps: 4250,
+    trafficThresholdPps: 8000,
+    protocol: "TLS 1.3 / ML-KEM-768",
+    hardware: "FPGA Wire-Speed NIC"
+  },
+  "node-2": {
+    id: "node-2",
+    name: "Variational Quantum Circuit (VQC Core)",
+    role: "Quantum Anomaly Classifier & State Vector Inference",
+    ip: "10.0.2.14",
+    initialUptimeSeconds: 5 * 86400 + 18 * 3600 + 44 * 60 + 12,
+    baseUptimePercent: 99.85,
+    baseLatency: 4.62,
+    normalTrafficPps: 5820,
+    trafficThresholdPps: 7500,
+    protocol: "Q-gRPC / DisCoCat Bus",
+    hardware: "QPU Simulator Co-Processor"
+  },
+  "node-3": {
+    id: "node-3",
+    name: "Cloud AWS S3 Bucket Log Store",
+    role: "Decentralized Immutable Audit Lake",
+    ip: "10.0.3.50",
+    initialUptimeSeconds: 84 * 86400 + 12 * 3600 + 10 * 60 + 5,
+    baseUptimePercent: 99.99,
+    baseLatency: 14.85,
+    normalTrafficPps: 2410,
+    trafficThresholdPps: 6000,
+    protocol: "HTTPS / S3 Object Lock",
+    hardware: "Distributed NVMe Mesh"
+  },
+  "node-4": {
+    id: "node-4",
+    name: "GNN Criticality Pivot Node 04",
+    role: "Graph Neural Network Message Passing Correlator",
+    ip: "10.0.4.92",
+    initialUptimeSeconds: 2 * 86400 + 9 * 3600 + 15 * 60 + 33,
+    baseUptimePercent: 99.42,
+    baseLatency: 6.22,
+    normalTrafficPps: 7120,
+    trafficThresholdPps: 7800,
+    protocol: "ZeroMQ / WireGuard Mesh",
+    hardware: "Tensor Core Neural Accel"
+  },
+  "node-5": {
+    id: "node-5",
+    name: "Deception Honeytoken Trap",
+    role: "Synthetic Adversary Decoy & Sinkhole Mesh",
+    ip: "10.0.9.99",
+    initialUptimeSeconds: 0 * 86400 + 19 * 3600 + 52 * 60 + 18,
+    baseUptimePercent: 98.70,
+    baseLatency: 2.38,
+    normalTrafficPps: 11450, // Honeypot naturally experiences high incoming reconnaissance probes!
+    trafficThresholdPps: 8000,
+    protocol: "Emulated SSH / RDP Decoy",
+    hardware: "Isolated MicroVM Sandbox"
+  }
+};
+
+const INITIAL_TRAFFIC_LIMITS: Record<string, number> = {
+  "node-1": 8000,
+  "node-2": 7500,
+  "node-3": 6000,
+  "node-4": 7800,
+  "node-5": 8000,
+};
+
+function generateInitialTrafficHistory(nodeId: string): number[] {
+  const host = HOST_NODES[nodeId] || HOST_NODES["node-1"];
+  const points: number[] = [];
+  const baseRate = host.normalTrafficPps;
+  const isInitialSurge = nodeId === "node-5";
+
+  for (let i = 59; i >= 0; i--) {
+    const variance = Math.sin(i * 0.35) * 0.1 + (Math.random() - 0.5) * 0.08;
+    let val = Math.round(baseRate * (1 + variance));
+    if (isInitialSurge) {
+      if (i <= 35) {
+        val = Math.round(host.trafficThresholdPps * 1.52 + Math.sin(i * 0.5) * 600 + 1200);
+      }
+    }
+    points.push(val);
+  }
+  return points;
+}
+
+function formatNodeUptimeDuration(seconds: number): string {
+  const d = Math.floor(seconds / 86400);
+  const h = Math.floor((seconds % 86400) / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  const s = seconds % 60;
+  return `${d}d ${h.toString().padStart(2, "0")}h ${m.toString().padStart(2, "0")}m ${s.toString().padStart(2, "0")}s`;
+}
+
 export default function App() {
   const [selectedCategory, setSelectedCategory] = useState<string>("All");
   const [searchQuery, setSearchQuery] = useState<string>("All Modules");
@@ -109,6 +232,165 @@ export default function App() {
   const [isolatedNodes, setIsolatedNodes] = useState<string[]>([]);
   const [pqcRotatedCount, setPqcRotatedCount] = useState<number>(0);
   const [isMitigating, setIsMitigating] = useState<boolean>(false);
+
+  // Dynamic Node Details Box Telemetry (Host Uptime, Packet Latency, and Simulated Internal Check Traffic Alert)
+  const [nodeUptimes, setNodeUptimes] = useState<Record<string, number>>({
+    "node-1": 14 * 86400 + 6 * 3600 + 23 * 60 + 41,
+    "node-2": 5 * 86400 + 18 * 3600 + 44 * 60 + 12,
+    "node-3": 84 * 86400 + 12 * 3600 + 10 * 60 + 5,
+    "node-4": 2 * 86400 + 9 * 3600 + 15 * 60 + 33,
+    "node-5": 0 * 86400 + 19 * 3600 + 52 * 60 + 18,
+  });
+
+  const [nodeLatencies, setNodeLatencies] = useState<Record<string, number>>({
+    "node-1": 1.25,
+    "node-2": 4.62,
+    "node-3": 14.85,
+    "node-4": 6.22,
+    "node-5": 2.38,
+  });
+
+  const [nodeTrafficRates, setNodeTrafficRates] = useState<Record<string, number>>({
+    "node-1": 4250,
+    "node-2": 5820,
+    "node-3": 2410,
+    "node-4": 7120,
+    "node-5": 11450,
+  });
+
+  const [simulatedSurgeNodes, setSimulatedSurgeNodes] = useState<Record<string, boolean>>({
+    "node-5": true, // Decoy honeypot starts with active surge demonstration
+  });
+
+  // Programmatic Traffic Limits per node (modifiable via Auto-Throttle)
+  const [nodeTrafficLimits, setNodeTrafficLimits] = useState<Record<string, number>>({ ...INITIAL_TRAFFIC_LIMITS });
+  
+  // Rolling 60-second traffic history per node for sparkline chart
+  const [nodeTrafficHistory, setNodeTrafficHistory] = useState<Record<string, number[]>>(() => ({
+    "node-1": generateInitialTrafficHistory("node-1"),
+    "node-2": generateInitialTrafficHistory("node-2"),
+    "node-3": generateInitialTrafficHistory("node-3"),
+    "node-4": generateInitialTrafficHistory("node-4"),
+    "node-5": generateInitialTrafficHistory("node-5"),
+  }));
+
+  // Track throttled states
+  const [nodeThrottleHistory, setNodeThrottleHistory] = useState<Record<string, { count: number; originalLimit: number }>>({});
+
+  // Refs for access in interval loop without stale closures
+  const simulatedSurgeRef = useRef(simulatedSurgeNodes);
+  simulatedSurgeRef.current = simulatedSurgeNodes;
+  const nodeLimitsRef = useRef(nodeTrafficLimits);
+  nodeLimitsRef.current = nodeTrafficLimits;
+
+  // Dynamic host uptime second counter & telemetry jitter loop + 60s sparkline history
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setNodeUptimes(prev => {
+        const next = { ...prev };
+        for (const k in next) {
+          next[k] += 1;
+        }
+        return next;
+      });
+
+      setNodeLatencies(prev => {
+        const next = { ...prev };
+        next["node-1"] = +(1.25 + (Math.random() - 0.5) * 0.35).toFixed(2);
+        next["node-2"] = +(4.62 + (Math.random() - 0.5) * 0.55).toFixed(2);
+        next["node-3"] = +(14.85 + (Math.random() - 0.5) * 1.2).toFixed(2);
+        next["node-4"] = +(6.22 + (Math.random() - 0.5) * 0.75).toFixed(2);
+        next["node-5"] = +(2.38 + (Math.random() - 0.5) * 0.4).toFixed(2);
+        return next;
+      });
+
+      const nextRates: Record<string, number> = {
+        "node-1": Math.round(4250 + (Math.random() - 0.5) * 600),
+        "node-2": Math.round(5820 + (Math.random() - 0.5) * 750),
+        "node-3": Math.round(2410 + (Math.random() - 0.5) * 350),
+        "node-4": Math.round(7120 + (Math.random() - 0.5) * 850),
+        "node-5": Math.round(11450 + (Math.random() - 0.5) * 1200),
+      };
+      setNodeTrafficRates(nextRates);
+
+      // Append live point to rolling 60-second traffic history
+      setNodeTrafficHistory(prev => {
+        const nextHist = { ...prev };
+        const surgeMap = simulatedSurgeRef.current;
+        const limitsMap = nodeLimitsRef.current;
+
+        for (const k of ["node-1", "node-2", "node-3", "node-4", "node-5"]) {
+          const host = HOST_NODES[k];
+          if (!host) continue;
+          const isSurging = !!surgeMap[k];
+          const threshold = limitsMap[k] ?? host.trafficThresholdPps;
+          const baseRate = nextRates[k] ?? host.normalTrafficPps;
+          const currentRate = isSurging 
+            ? Math.max(baseRate, Math.round(threshold * 1.52 + 1850 + (Math.random() - 0.5) * 300))
+            : baseRate;
+          const currentArr = nextHist[k] ? [...nextHist[k]] : [];
+          currentArr.push(currentRate);
+          nextHist[k] = currentArr.slice(-60);
+        }
+        return nextHist;
+      });
+    }, 1000);
+
+    return () => clearInterval(timer);
+  }, []);
+
+  // Programmatic Auto-Throttle Handler (reduces node traffic limit by 50% and logs to terminal)
+  const handleAutoThrottle = (nodeId: string) => {
+    const host = HOST_NODES[nodeId] || HOST_NODES["node-1"];
+    const currentLimit = nodeTrafficLimits[nodeId] ?? host.trafficThresholdPps;
+    const isSurging = !!simulatedSurgeNodes[nodeId];
+    const liveTraffic = nodeTrafficRates[nodeId] ?? host.normalTrafficPps;
+    const effectiveTraffic = isSurging 
+      ? Math.max(liveTraffic, Math.round(currentLimit * 1.52 + 1850))
+      : liveTraffic;
+    const isSurgeCondition = isSurging || effectiveTraffic > currentLimit;
+
+    // Programmatically reduce the node's traffic limit by 50%
+    const newLimit = Math.max(500, Math.round(currentLimit * 0.5));
+    setNodeTrafficLimits(prev => ({
+      ...prev,
+      [nodeId]: newLimit
+    }));
+
+    setNodeThrottleHistory(prev => ({
+      ...prev,
+      [nodeId]: {
+        count: (prev[nodeId]?.count || 0) + 1,
+        originalLimit: prev[nodeId]?.originalLimit || currentLimit
+      }
+    }));
+
+    const timestamp = new Date().toLocaleTimeString();
+    const actionLog = isSurgeCondition
+      ? `[${timestamp}] AUTO-THROTTLE: Ingress traffic surge detected on ${host.id.toUpperCase()} (${host.name}). Programmatically reduced traffic limit by 50% (${currentLimit.toLocaleString()} pkt/s → ${newLimit.toLocaleString()} pkt/s). Kernel eBPF rate-limiting active.`
+      : `[${timestamp}] AUTO-THROTTLE: Programmatically reduced traffic limit by 50% on ${host.id.toUpperCase()} (${host.name}) from ${currentLimit.toLocaleString()} pkt/s to ${newLimit.toLocaleString()} pkt/s.`;
+
+    setLiveLogs(prev => [...prev, actionLog]);
+    console.log(actionLog);
+  };
+
+  const handleResetThrottle = (nodeId: string) => {
+    const host = HOST_NODES[nodeId] || HOST_NODES["node-1"];
+    const baseline = host.trafficThresholdPps;
+    setNodeTrafficLimits(prev => ({
+      ...prev,
+      [nodeId]: baseline
+    }));
+    setNodeThrottleHistory(prev => {
+      const copy = { ...prev };
+      delete copy[nodeId];
+      return copy;
+    });
+    const timestamp = new Date().toLocaleTimeString();
+    const resetLog = `[${timestamp}] RATE-LIMIT RESTORED: Host ${host.id.toUpperCase()} baseline traffic limit restored to ${baseline.toLocaleString()} pkt/s.`;
+    setLiveLogs(prev => [...prev, resetLog]);
+    console.log(resetLog);
+  };
 
   // Gemini chat state
   const [chatInput, setChatInput] = useState<string>("");
@@ -1105,38 +1387,509 @@ export default function App() {
               </div>
 
               {/* Selected Node Details Box */}
-              <div className="bg-slate-900/60 border border-slate-900 p-3 rounded-lg flex items-center justify-between" id="node-details-box">
-                <div className="space-y-1">
-                  <div className="text-xs font-bold text-slate-200 font-mono">
-                    Selected Host: {selectedNodeId === "node-1" ? "Ingress Edge Gateway (GW1)" : selectedNodeId === "node-2" ? "Variational Quantum Circuit (VQC Core)" : selectedNodeId === "node-3" ? "Cloud AWS S3 Bucket Log Store" : selectedNodeId === "node-4" ? "GNN Criticality Pivot Node 04" : "Deception Honeytoken Trap"}
-                  </div>
-                  <p className="text-[11px] text-slate-400 font-mono">
-                    {isolatedNodes.includes(selectedNodeId || "") ? "⚠️ HOST ISOLATED FROM MAIN ZERO-TRUST MESH" : "Status: Active & Routing Telemetry Signals"}
-                  </p>
-                </div>
+              {(() => {
+                const activeHostId = selectedNodeId || "node-1";
+                const activeHost = HOST_NODES[activeHostId] || HOST_NODES["node-1"];
+                const isHostIsolated = isolatedNodes.includes(activeHostId);
+                const isHostSurging = !!simulatedSurgeNodes[activeHostId];
+                const activeLimit = nodeTrafficLimits[activeHostId] ?? activeHost.trafficThresholdPps;
+                const isThrottled = !!nodeThrottleHistory[activeHostId];
+                
+                const baseLiveTraffic = nodeTrafficRates[activeHostId] ?? activeHost.normalTrafficPps;
+                const effectiveTraffic = isHostSurging 
+                  ? Math.max(baseLiveTraffic, Math.round(activeLimit * 1.52 + 1850))
+                  : baseLiveTraffic;
 
-                {selectedNodeId && (
-                  <button
-                    id="isolate-node-toggle-btn"
-                    onClick={() => {
-                      setIsolatedNodes(prev => 
-                        prev.includes(selectedNodeId) ? prev.filter(id => id !== selectedNodeId) : [...prev, selectedNodeId]
-                      );
-                      setLiveLogs(prev => [
-                        ...prev,
-                        `[${new Date().toLocaleTimeString()}] NETWORK: Toggled isolation posture for ${selectedNodeId}.`
-                      ]);
-                    }}
-                    className={`px-3 py-1 text-xs font-semibold rounded font-mono transition-all ${
-                      isolatedNodes.includes(selectedNodeId) 
-                        ? "bg-emerald-950 text-emerald-400 border border-emerald-900" 
-                        : "bg-red-950 text-red-400 border border-red-900"
-                    }`}
-                  >
-                    {isolatedNodes.includes(selectedNodeId) ? "Re-connect Host" : "Isolate Host"}
-                  </button>
-                )}
-              </div>
+                // Simulated Internal Check: checks if incoming traffic exceeds safety threshold
+                const isTrafficAlertActive = effectiveTraffic > activeLimit;
+                const trafficExcessPct = isTrafficAlertActive 
+                  ? Math.round(((effectiveTraffic - activeLimit) / activeLimit) * 100)
+                  : 0;
+
+                const liveLatency = nodeLatencies[activeHostId] ?? activeHost.baseLatency;
+                const liveUptimeSec = nodeUptimes[activeHostId] ?? activeHost.initialUptimeSeconds;
+                const displayedUptimePercent = isHostIsolated ? 0 : activeHost.baseUptimePercent;
+
+                return (
+                  <div className="bg-slate-900/80 border border-slate-800 p-4 rounded-xl space-y-4 transition-all shadow-lg" id="node-details-box">
+                    {/* Top Row: Host Identity & Action Controls */}
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-800 pb-3">
+                      <div className="space-y-1">
+                        <div className="flex items-center space-x-2">
+                          <Server className="w-4 h-4 text-cyan-400" />
+                          <span className="text-xs font-bold text-slate-100 font-mono tracking-wide">
+                            {activeHost.name}
+                          </span>
+                          <span className="text-[10px] bg-slate-800/90 text-cyan-300 px-1.5 py-0.5 rounded font-mono font-semibold border border-slate-700">
+                            {activeHost.id.toUpperCase()}
+                          </span>
+                          <span className="text-[10px] bg-slate-800/60 text-slate-400 px-1.5 py-0.5 rounded font-mono">
+                            {activeHost.ip}
+                          </span>
+                          {isThrottled && (
+                            <span className="text-[9px] bg-purple-950/80 text-purple-300 px-1.5 py-0.5 rounded font-mono font-bold border border-purple-800">
+                              THROTTLED -50%
+                            </span>
+                          )}
+                        </div>
+                        <p className="text-[11px] text-slate-400 font-mono flex items-center space-x-2">
+                          <span>{activeHost.role}</span>
+                          <span className="text-slate-600">•</span>
+                          <span className="text-slate-500">{activeHost.protocol}</span>
+                        </p>
+                      </div>
+
+                      <div className="flex flex-wrap items-center gap-2">
+                        {/* Auto-Throttle Button (programmatically reduces node traffic limit by 50% during surge and logs action to terminal) */}
+                        <button
+                          id="auto-throttle-btn"
+                          onClick={() => handleAutoThrottle(activeHostId)}
+                          className={`px-2.5 py-1 text-xs font-mono rounded flex items-center space-x-1.5 transition-all border font-semibold ${
+                            isTrafficAlertActive || isHostSurging
+                              ? "bg-amber-950/90 text-amber-200 border-amber-500 hover:bg-amber-900 shadow-[0_0_14px_rgba(245,158,11,0.55)] animate-pulse"
+                              : isThrottled
+                                ? "bg-purple-950/80 text-purple-300 border-purple-700 hover:bg-purple-900"
+                                : "bg-slate-800/80 text-slate-300 border-slate-700 hover:bg-slate-700 hover:text-white"
+                          }`}
+                          title="Programmatically reduce the node's traffic limit by 50% during a traffic surge and log the action to the terminal"
+                        >
+                          <Zap className={`w-3.5 h-3.5 ${isTrafficAlertActive || isHostSurging ? "text-amber-400 fill-amber-400 animate-bounce" : "text-slate-400"}`} />
+                          <span>
+                            Auto-Throttle {isThrottled ? `(-50% x${nodeThrottleHistory[activeHostId]?.count})` : "(-50%)"}
+                          </span>
+                        </button>
+
+                        {/* Reset Throttled Limit Button */}
+                        {isThrottled && (
+                          <button
+                            id="reset-throttle-btn"
+                            onClick={() => handleResetThrottle(activeHostId)}
+                            className="px-2 py-1 text-[11px] font-mono rounded flex items-center space-x-1 bg-slate-800/90 hover:bg-slate-700 text-slate-300 border border-slate-700 transition-all"
+                            title="Restore node traffic limit back to factory baseline"
+                          >
+                            <RotateCcw className="w-3 h-3 text-slate-400" />
+                            <span>Reset Limit</span>
+                          </button>
+                        )}
+
+                        {/* Simulate Traffic Spike Toggle (Internal Check Trigger) */}
+                        <button
+                          id="simulate-traffic-surge-btn"
+                          onClick={() => {
+                            setSimulatedSurgeNodes(prev => ({
+                              ...prev,
+                              [activeHostId]: !prev[activeHostId]
+                            }));
+                            setLiveLogs(prev => [
+                              ...prev,
+                              `[${new Date().toLocaleTimeString()}] SIMULATION: Toggled ingress surge pattern on ${activeHost.id} (${!isHostSurging ? 'SURGE ACTIVE' : 'SURGE CEASED'}).`
+                            ]);
+                          }}
+                          className={`px-2.5 py-1 text-xs font-mono rounded flex items-center space-x-1.5 transition-all border ${
+                            isHostSurging 
+                              ? "bg-rose-950/80 text-rose-300 border-rose-700 hover:bg-rose-900 shadow-[0_0_10px_rgba(244,63,94,0.4)]" 
+                              : "bg-slate-800/80 text-slate-300 border-slate-700 hover:bg-slate-700 hover:text-white"
+                          }`}
+                          title="Simulate unusually high incoming traffic to trigger the internal check alert"
+                        >
+                          <Flame className={`w-3.5 h-3.5 ${isHostSurging ? "text-rose-400 animate-pulse" : "text-slate-400"}`} />
+                          <span>{isHostSurging ? "Stop Traffic Surge" : "Simulate Traffic Surge"}</span>
+                        </button>
+
+                        {/* Isolate Host Toggle */}
+                        {selectedNodeId && (
+                          <button
+                            id="isolate-node-toggle-btn"
+                            onClick={() => {
+                              setIsolatedNodes(prev => 
+                                prev.includes(selectedNodeId) ? prev.filter(id => id !== selectedNodeId) : [...prev, selectedNodeId]
+                              );
+                              setLiveLogs(prev => [
+                                ...prev,
+                                `[${new Date().toLocaleTimeString()}] NETWORK: Toggled isolation posture for ${selectedNodeId}.`
+                              ]);
+                            }}
+                            className={`px-3 py-1 text-xs font-semibold rounded font-mono transition-all border ${
+                              isHostIsolated 
+                                ? "bg-emerald-950 text-emerald-400 border-emerald-900 hover:bg-emerald-900" 
+                                : "bg-red-950 text-red-400 border-red-900 hover:bg-red-900"
+                            }`}
+                          >
+                            {isHostIsolated ? "Re-connect Host" : "Isolate Host"}
+                          </button>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Middle Row: Dynamic Gauges Grid (Host Uptime Gauge & Packet Inspection Latency Gauge) */}
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5">
+                      {/* 1. Dynamic Host Uptime Gauge */}
+                      <div className="bg-slate-950/70 border border-slate-800/90 rounded-lg p-3 space-y-2.5" id="host-uptime-gauge">
+                        <div className="flex items-center justify-between text-xs font-mono">
+                          <div className="flex items-center space-x-1.5 text-slate-300 font-semibold">
+                            <Timer className="w-3.5 h-3.5 text-emerald-400" />
+                            <span>Host Uptime</span>
+                          </div>
+                          <span className={`text-[10px] px-1.5 py-0.5 rounded font-mono font-bold ${
+                            isHostIsolated 
+                              ? "bg-red-950/80 text-red-400 border border-red-900" 
+                              : "bg-emerald-950/80 text-emerald-300 border border-emerald-800/80"
+                          }`}>
+                            {isHostIsolated ? "SUSPENDED" : "HIGH AVAILABILITY"}
+                          </span>
+                        </div>
+
+                        {/* Uptime Numerical Display */}
+                        <div className="flex items-baseline justify-between font-mono">
+                          <div className="flex items-baseline space-x-1.5">
+                            <span className={`text-xl font-extrabold ${isHostIsolated ? "text-red-400" : "text-emerald-400"}`}>
+                              {displayedUptimePercent.toFixed(2)}%
+                            </span>
+                            <span className="text-[10px] text-slate-500">Service Level</span>
+                          </div>
+                          <div className="text-right">
+                            <div className="text-xs font-bold text-slate-200">
+                              {isHostIsolated ? "0d 00h 00m 00s" : formatNodeUptimeDuration(liveUptimeSec)}
+                            </div>
+                            <div className="text-[9px] text-slate-500">Live Continuous Run</div>
+                          </div>
+                        </div>
+
+                        {/* Visual Uptime Gauge Bar */}
+                        <div className="space-y-1">
+                          <div className="h-2 w-full bg-slate-900 rounded-full overflow-hidden p-0.5 border border-slate-800">
+                            <div 
+                              className={`h-full rounded-full transition-all duration-500 ${
+                                isHostIsolated 
+                                  ? "bg-red-500 w-[0%]" 
+                                  : "bg-gradient-to-r from-teal-500 to-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.4)]"
+                              }`}
+                              style={{ width: `${isHostIsolated ? 0 : Math.min(displayedUptimePercent, 100)}%` }}
+                            />
+                          </div>
+                          <div className="flex justify-between text-[9px] font-mono text-slate-500">
+                            <span>0%</span>
+                            <span>90%</span>
+                            <span>99%</span>
+                            <span className="text-emerald-400 font-semibold">100% SLA</span>
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* 2. Dynamic Packet Inspection Latency Gauge */}
+                      <div className="bg-slate-950/70 border border-slate-800/90 rounded-lg p-3 space-y-2.5" id="packet-latency-gauge">
+                        <div className="flex items-center justify-between text-xs font-mono">
+                          <div className="flex items-center space-x-1.5 text-slate-300 font-semibold">
+                            <Gauge className="w-3.5 h-3.5 text-blue-400" />
+                            <span>Packet Inspection Latency</span>
+                          </div>
+                          <span className={`text-[10px] px-1.5 py-0.5 rounded font-mono font-bold ${
+                            liveLatency < 5 
+                              ? "bg-emerald-950/80 text-emerald-300 border border-emerald-800/80" 
+                              : liveLatency < 15 
+                                ? "bg-amber-950/80 text-amber-300 border border-amber-800/80" 
+                                : "bg-rose-950/80 text-rose-300 border border-rose-800/80"
+                          }`}>
+                            {liveLatency < 5 ? "WIRE-SPEED (<5ms)" : liveLatency < 15 ? "NOMINAL (<15ms)" : "ELEVATED"}
+                          </span>
+                        </div>
+
+                        {/* Latency Numerical Display */}
+                        <div className="flex items-baseline justify-between font-mono">
+                          <div className="flex items-baseline space-x-1.5">
+                            <span className={`text-xl font-extrabold ${
+                              liveLatency < 5 ? "text-emerald-400" : liveLatency < 15 ? "text-amber-400" : "text-rose-400"
+                            }`}>
+                              {liveLatency.toFixed(2)} ms
+                            </span>
+                            <span className="text-[10px] text-slate-500">Inspection Time</span>
+                          </div>
+                          <div className="text-right">
+                            <div className="text-xs font-bold text-slate-300">
+                              Jitter: ±0.14 ms
+                            </div>
+                            <div className="text-[9px] text-slate-500">Zero-Copy Kernel Bypass</div>
+                          </div>
+                        </div>
+
+                        {/* Visual Latency Gauge Bar */}
+                        <div className="space-y-1">
+                          <div className="relative h-2 w-full bg-slate-900 rounded-full overflow-hidden border border-slate-800">
+                            {/* Color bands: 0-5ms (green), 5-15ms (yellow), 15-25ms+ (red) */}
+                            <div className="absolute inset-0 flex">
+                              <div className="w-[20%] bg-emerald-500/20 border-r border-emerald-500/40" />
+                              <div className="w-[40%] bg-amber-500/20 border-r border-amber-500/40" />
+                              <div className="w-[40%] bg-rose-500/20" />
+                            </div>
+                            {/* Active pointer bar */}
+                            <div 
+                              className={`h-full rounded-full transition-all duration-300 ${
+                                liveLatency < 5 
+                                  ? "bg-gradient-to-r from-cyan-400 to-emerald-400" 
+                                  : liveLatency < 15 
+                                    ? "bg-gradient-to-r from-amber-400 to-orange-400" 
+                                    : "bg-gradient-to-r from-rose-500 to-red-600"
+                              }`}
+                              style={{ width: `${Math.min((liveLatency / 25) * 100, 100)}%` }}
+                            />
+                          </div>
+                          <div className="flex justify-between text-[9px] font-mono text-slate-500">
+                            <span className="text-emerald-500 font-semibold">0ms (Ideal)</span>
+                            <span className="text-amber-500">5ms</span>
+                            <span className="text-rose-500">15ms</span>
+                            <span>25ms+</span>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Bottom Row: Traffic Alert Indicator (Glows Red when unusually high incoming traffic via simulated internal check) */}
+                    <div 
+                      id="traffic-alert-indicator"
+                      className={`rounded-lg p-3 transition-all duration-300 font-mono ${
+                        isTrafficAlertActive 
+                          ? "bg-red-950/80 border-2 border-red-500 text-red-200 shadow-[0_0_25px_rgba(239,68,68,0.7)] animate-pulse" 
+                          : "bg-slate-950/70 border border-slate-800 text-slate-300"
+                      }`}
+                    >
+                      <div className="flex items-start space-x-3">
+                        <div className="mt-0.5 flex-shrink-0">
+                          {isTrafficAlertActive ? (
+                            <AlertTriangle className="w-5 h-5 text-red-400 animate-bounce" />
+                          ) : (
+                            <CheckCircle className="w-4 h-4 text-emerald-400" />
+                          )}
+                        </div>
+
+                        <div className="flex-1 space-y-2">
+                          <div className="flex flex-wrap items-center justify-between gap-1">
+                            <div className="flex items-center space-x-2">
+                              <span className={`text-xs font-extrabold uppercase tracking-wider ${
+                                isTrafficAlertActive ? "text-red-300" : "text-emerald-300"
+                              }`}>
+                                {isTrafficAlertActive ? "Traffic Alert: Unusual Ingress Surge Detected" : "Traffic Monitor: Ingress Flow Nominal"}
+                              </span>
+                              {isTrafficAlertActive && (
+                                <span className="bg-red-900/90 text-red-100 text-[9px] font-black px-1.5 py-0.5 rounded border border-red-600 animate-pulse">
+                                  CRITICAL SPIKE +{trafficExcessPct}%
+                                </span>
+                              )}
+                              {isThrottled && (
+                                <span className="bg-purple-900/90 text-purple-200 text-[9px] font-bold px-1.5 py-0.5 rounded border border-purple-600">
+                                  LIMIT REDUCED -50%
+                                </span>
+                              )}
+                            </div>
+
+                            <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${
+                              isTrafficAlertActive 
+                                ? "bg-red-900/60 text-red-300 border border-red-700" 
+                                : "bg-emerald-950/60 text-emerald-400 border border-emerald-900/60"
+                            }`}>
+                              Simulated Internal Check: {isTrafficAlertActive ? "FAILED (SURGE DETECTED)" : "PASSED"}
+                            </span>
+                          </div>
+
+                          <p className="text-[11px] text-slate-300">
+                            {isTrafficAlertActive ? (
+                              <span>
+                                Ingress volume on <strong className="text-white">{activeHost.name}</strong> reached <strong className="text-red-300">{effectiveTraffic.toLocaleString()} pkt/s</strong>, exceeding the calibrated safety threshold of <strong className="text-white">{activeLimit.toLocaleString()} pkt/s</strong>. Click <strong className="text-amber-300">Auto-Throttle</strong> above to reduce traffic limits by 50% and engage token-bucket shaping.
+                              </span>
+                            ) : (
+                              <span>
+                                Ingress rate is currently <strong className="text-emerald-400">{effectiveTraffic.toLocaleString()} pkt/s</strong>, remaining comfortably below the safe threshold of <strong className="text-slate-200">{activeLimit.toLocaleString()} pkt/s</strong>. Packet distribution is uniform and benign.
+                              </span>
+                            )}
+                          </p>
+
+                          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px] text-slate-400 pt-0.5 border-b border-slate-800/80 pb-2">
+                            <span>Ingress Rate: <strong className={isTrafficAlertActive ? "text-red-300" : "text-slate-200"}>{effectiveTraffic.toLocaleString()} pkt/s</strong></span>
+                            <span>•</span>
+                            <span>
+                              Threshold Limit: <strong className={isThrottled ? "text-purple-300" : "text-slate-200"}>{activeLimit.toLocaleString()} pkt/s</strong>
+                              {isThrottled && <span className="text-[9px] text-purple-400 ml-1">(-50% Throttled)</span>}
+                            </span>
+                            <span>•</span>
+                            <span>Inspection Engine: <strong>eBPF XDP Driver Active</strong></span>
+                          </div>
+
+                          {/* Sparkline Chart showing last 60 seconds of traffic patterns for the node */}
+                          <div id="traffic-sparkline-chart" className="space-y-1.5 pt-1">
+                            <div className="flex items-center justify-between text-[11px]">
+                              <div className="flex items-center space-x-1.5 text-slate-300 font-semibold">
+                                <Activity className={`w-3.5 h-3.5 ${isTrafficAlertActive ? "text-red-400" : "text-emerald-400"}`} />
+                                <span>Last 60 Seconds Traffic Patterns (Surge Severity Context)</span>
+                              </div>
+                              <div className="flex items-center space-x-2">
+                                <span className={`text-[9px] px-1.5 py-0.5 rounded font-bold uppercase ${
+                                  isTrafficAlertActive 
+                                    ? "bg-red-900/90 text-red-100 border border-red-500 shadow-[0_0_8px_rgba(239,68,68,0.5)] animate-pulse"
+                                    : isThrottled
+                                      ? "bg-purple-900/70 text-purple-300 border border-purple-700"
+                                      : "bg-emerald-950/70 text-emerald-400 border border-emerald-900"
+                                }`}>
+                                  {isTrafficAlertActive 
+                                    ? `SURGE SEVERITY: ${trafficExcessPct > 50 ? "CRITICAL" : "ELEVATED"} (+${trafficExcessPct}%)` 
+                                    : isThrottled
+                                      ? "THROTTLED (-50%)"
+                                      : "SURGE SEVERITY: NOMINAL"}
+                                </span>
+                              </div>
+                            </div>
+
+                            {/* SVG Sparkline Graph */}
+                            {(() => {
+                              const history = nodeTrafficHistory[activeHostId] || [effectiveTraffic];
+                              const dataLen = history.length;
+                              const minVal = Math.min(...history, activeLimit * 0.6);
+                              const maxVal = Math.max(...history, activeLimit * 1.35, 1000);
+                              const range = maxVal - minVal || 1;
+
+                              const svgWidth = 540;
+                              const svgHeight = 74;
+                              const padX = 8;
+                              const padY = 8;
+                              const plotWidth = svgWidth - padX * 2;
+                              const plotHeight = svgHeight - padY * 2;
+
+                              const points = history.map((val, idx) => {
+                                const x = padX + (idx / Math.max(dataLen - 1, 1)) * plotWidth;
+                                const y = padY + plotHeight - ((val - minVal) / range) * plotHeight;
+                                return { x, y, val };
+                              });
+
+                              const pathD = points.reduce((acc, pt, idx) => {
+                                return idx === 0 ? `M ${pt.x.toFixed(1)} ${pt.y.toFixed(1)}` : `${acc} L ${pt.x.toFixed(1)} ${pt.y.toFixed(1)}`;
+                              }, "");
+
+                              const areaD = `${pathD} L ${(padX + plotWidth).toFixed(1)} ${(padY + plotHeight).toFixed(1)} L ${padX.toFixed(1)} ${(padY + plotHeight).toFixed(1)} Z`;
+
+                              const limitY = padY + plotHeight - ((activeLimit - minVal) / range) * plotHeight;
+                              const clampedLimitY = Math.max(padY + 2, Math.min(padY + plotHeight - 2, limitY));
+
+                              const lastPt = points[points.length - 1] || { x: padX + plotWidth, y: padY + plotHeight / 2, val: effectiveTraffic };
+                              const peakVal = Math.max(...history);
+                              const avgVal = Math.round(history.reduce((a, b) => a + b, 0) / Math.max(history.length, 1));
+                              const minTraffic = Math.min(...history);
+
+                              const gradId = `sparkline-grad-${activeHostId}`;
+
+                              return (
+                                <div className="space-y-1.5">
+                                  <div className="relative w-full bg-slate-950/80 rounded-lg p-2 border border-slate-800/80 overflow-hidden shadow-inner">
+                                    <svg
+                                      viewBox={`0 0 ${svgWidth} ${svgHeight}`}
+                                      className="w-full h-16 md:h-20 overflow-visible"
+                                      preserveAspectRatio="none"
+                                    >
+                                      <defs>
+                                        <linearGradient id={gradId} x1="0" y1="0" x2="0" y2="1">
+                                          <stop offset="0%" stopColor={isTrafficAlertActive ? "#ef4444" : "#10b981"} stopOpacity={isTrafficAlertActive ? "0.55" : "0.35"} />
+                                          <stop offset="100%" stopColor={isTrafficAlertActive ? "#b91c1c" : "#059669"} stopOpacity="0.0" />
+                                        </linearGradient>
+                                      </defs>
+
+                                      {/* Subtle horizontal grid lines */}
+                                      <line x1={padX} y1={padY + plotHeight * 0.25} x2={padX + plotWidth} y2={padY + plotHeight * 0.25} stroke="#334155" strokeDasharray="2 3" strokeOpacity="0.4" />
+                                      <line x1={padX} y1={padY + plotHeight * 0.5} x2={padX + plotWidth} y2={padY + plotHeight * 0.5} stroke="#334155" strokeDasharray="2 3" strokeOpacity="0.4" />
+                                      <line x1={padX} y1={padY + plotHeight * 0.75} x2={padX + plotWidth} y2={padY + plotHeight * 0.75} stroke="#334155" strokeDasharray="2 3" strokeOpacity="0.4" />
+
+                                      {/* Threshold reference line */}
+                                      <line
+                                        x1={padX}
+                                        y1={clampedLimitY}
+                                        x2={padX + plotWidth}
+                                        y2={clampedLimitY}
+                                        stroke={isTrafficAlertActive ? "#f59e0b" : "#64748b"}
+                                        strokeDasharray="4 3"
+                                        strokeWidth="1.5"
+                                      />
+                                      <text
+                                        x={padX + plotWidth - 4}
+                                        y={Math.max(padY + 9, clampedLimitY - 3)}
+                                        textAnchor="end"
+                                        fill={isTrafficAlertActive ? "#fbbf24" : "#94a3b8"}
+                                        fontSize="8"
+                                        fontFamily="monospace"
+                                        fontWeight="bold"
+                                      >
+                                        LIMIT: {activeLimit.toLocaleString()} pps
+                                      </text>
+
+                                      {/* Area under curve */}
+                                      <path d={areaD} fill={`url(#${gradId})`} />
+
+                                      {/* Main Sparkline Stroke */}
+                                      <path
+                                        d={pathD}
+                                        fill="none"
+                                        stroke={isTrafficAlertActive ? "#f43f5e" : "#10b981"}
+                                        strokeWidth="2.2"
+                                        strokeLinecap="round"
+                                        strokeLinejoin="round"
+                                      />
+
+                                      {/* Pulsing Live Marker on latest value */}
+                                      <circle
+                                        cx={lastPt.x}
+                                        cy={lastPt.y}
+                                        r="6"
+                                        fill={isTrafficAlertActive ? "#ef4444" : "#10b981"}
+                                        className="animate-ping opacity-60"
+                                      />
+                                      <circle
+                                        cx={lastPt.x}
+                                        cy={lastPt.y}
+                                        r="3.5"
+                                        fill={isTrafficAlertActive ? "#f43f5e" : "#34d399"}
+                                        stroke="#ffffff"
+                                        strokeWidth="1"
+                                      />
+                                    </svg>
+
+                                    {/* Time markers along X axis */}
+                                    <div className="flex justify-between items-center text-[9px] font-mono text-slate-500 pt-1 px-1">
+                                      <span>-60s</span>
+                                      <span>-45s</span>
+                                      <span>-30s</span>
+                                      <span>-15s</span>
+                                      <span className={isTrafficAlertActive ? "text-rose-400 font-bold" : "text-emerald-400 font-semibold"}>NOW (Live)</span>
+                                    </div>
+                                  </div>
+
+                                  {/* Surge Severity & Telemetry Context Bar */}
+                                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 pt-1 text-[10px] font-mono">
+                                    <div className="bg-slate-900/90 rounded px-2 py-1 border border-slate-800">
+                                      <span className="text-slate-500 block text-[9px]">60s Min Rate</span>
+                                      <span className="text-slate-300 font-bold">{minTraffic.toLocaleString()} pps</span>
+                                    </div>
+                                    <div className="bg-slate-900/90 rounded px-2 py-1 border border-slate-800">
+                                      <span className="text-slate-500 block text-[9px]">60s Avg Rate</span>
+                                      <span className="text-slate-300 font-bold">{avgVal.toLocaleString()} pps</span>
+                                    </div>
+                                    <div className="bg-slate-900/90 rounded px-2 py-1 border border-slate-800">
+                                      <span className="text-slate-500 block text-[9px]">60s Peak Surge</span>
+                                      <span className={`font-bold ${peakVal > activeLimit ? "text-rose-400" : "text-emerald-400"}`}>
+                                        {peakVal.toLocaleString()} pps
+                                      </span>
+                                    </div>
+                                    <div className="bg-slate-900/90 rounded px-2 py-1 border border-slate-800">
+                                      <span className="text-slate-500 block text-[9px]">Surge Ratio</span>
+                                      <span className={`font-bold ${peakVal > activeLimit ? "text-amber-300" : "text-slate-300"}`}>
+                                        {(peakVal / activeLimit).toFixed(2)}x of Limit
+                                      </span>
+                                    </div>
+                                  </div>
+                                </div>
+                              );
+                            })()}
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })()}
             </div>
           )}
 

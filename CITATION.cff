@@ -1,0 +1,17 @@
+cff-version: 1.2.0
+message: "If you use Quantum Sentinel AI in your research or cybersecurity defense work, please cite it as below."
+authors:
+  - family-names: "Chronos Defense Team"
+    given-names: "Quantum Sentinel"
+title: "Quantum Sentinel AI (QSAI): The Chronos Cyber Defense Platform"
+version: 1.0.0
+date-released: 2026-10-17
+url: "https://github.com/quantum-sentinel-ai/qsai"
+keywords:
+  - "cybersecurity"
+  - "quantum-computing"
+  - "post-quantum-cryptography"
+  - "variational-quantum-classifier"
+  - "continuous-time-quantum-walk"
+  - "qgan"
+  - "threat-intelligence"
