@@ -14,6 +14,7 @@ export interface SimulationResult {
   logs: string[];
   recommendations: string[];
   visualizationData?: any; // D3/Recharts data generated dynamically
+  timestampIso?: string;
 }
 
 export interface SecurityEvent {

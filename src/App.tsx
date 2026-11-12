@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef, useMemo } from "react";
 
 // Graceful WebSocket Monitor to handle/swallow benign Vite HMR socket disconnect errors
 if (typeof window !== "undefined") {
@@ -85,6 +85,9 @@ import { ModuleDef, SimulationResult, SecurityEvent, BlockchainBlock } from "./t
 import { ThreatDensityHeatmap } from "./ThreatDensityHeatmap";
 import { AvantGardeLabTools } from "./AvantGardeLabTools";
 import { QuantumAIPythonWorkspace } from "./QuantumAIPythonWorkspace";
+import { NodeHealthDashboardOverlay } from "./NodeHealthDashboardOverlay";
+import { DependencyRelationshipMap } from "./DependencyRelationshipMap";
+import { ExecutiveSimulationSummaryModal, PostureDimensionPoint } from "./ExecutiveSimulationSummaryModal";
 
 const CATEGORIES = [
   "All",
@@ -229,6 +232,9 @@ export default function App() {
   const [isAutoPilot, setIsAutoPilot] = useState<boolean>(false);
   const [viewTab, setViewTab] = useState<"telemetry" | "quantum-ai-python" | "avant-garde-tools" | "attack-graph" | "pqc-matrix" | "threat-events">("telemetry");
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>("node-1");
+  const [isNodeHealthOverlayOpen, setIsNodeHealthOverlayOpen] = useState<boolean>(false);
+  const [isExecSummaryOpen, setIsExecSummaryOpen] = useState<boolean>(false);
+  const [execSummaryModule, setExecSummaryModule] = useState<ModuleDef | null>(null);
   const [isolatedNodes, setIsolatedNodes] = useState<string[]>([]);
   const [pqcRotatedCount, setPqcRotatedCount] = useState<number>(0);
   const [isMitigating, setIsMitigating] = useState<boolean>(false);
@@ -372,6 +378,8 @@ export default function App() {
 
     setLiveLogs(prev => [...prev, actionLog]);
     console.log(actionLog);
+
+    fetch(`/api/nodes/${encodeURIComponent(nodeId)}/throttle`, { method: "POST" }).catch(() => {});
   };
 
   const handleResetThrottle = (nodeId: string) => {
@@ -390,6 +398,31 @@ export default function App() {
     const resetLog = `[${timestamp}] RATE-LIMIT RESTORED: Host ${host.id.toUpperCase()} baseline traffic limit restored to ${baseline.toLocaleString()} pkt/s.`;
     setLiveLogs(prev => [...prev, resetLog]);
     console.log(resetLog);
+
+    fetch(`/api/nodes/${encodeURIComponent(nodeId)}/reset-throttle`, { method: "POST" }).catch(() => {});
+  };
+
+  const handleToggleSurge = (nodeId: string) => {
+    const host = HOST_NODES[nodeId] || HOST_NODES["node-1"];
+    const nextSurging = !simulatedSurgeNodes[nodeId];
+    setSimulatedSurgeNodes(prev => ({
+      ...prev,
+      [nodeId]: nextSurging
+    }));
+    setLiveLogs(prev => [
+      ...prev,
+      `[${new Date().toLocaleTimeString()}] SIMULATION: Toggled ingress surge pattern on ${host.id} (${nextSurging ? "SURGE ACTIVE" : "SURGE CEASED"}).`
+    ]);
+  };
+
+  const handleToggleIsolate = (nodeId: string) => {
+    setIsolatedNodes(prev =>
+      prev.includes(nodeId) ? prev.filter(id => id !== nodeId) : [...prev, nodeId]
+    );
+    setLiveLogs(prev => [
+      ...prev,
+      `[${new Date().toLocaleTimeString()}] NETWORK: Toggled isolation posture for ${nodeId}.`
+    ]);
   };
 
   // Gemini chat state
@@ -402,62 +435,76 @@ export default function App() {
   ]);
   const [chatLoading, setChatLoading] = useState<boolean>(false);
   
-  // Simulated overall status values
-  const [systemRiskScore, setSystemRiskScore] = useState<number>(34);
-  const [overallHealth, setOverallHealth] = useState<number>(94.8);
+  // Simulated overall status values (hardened baseline)
+  const [systemRiskScore, setSystemRiskScore] = useState<number>(12);
+  const [overallHealth, setOverallHealth] = useState<number>(99.4);
   const [totalScansCount, setTotalScansCount] = useState<number>(1420);
   
   // Auto terminal log feeds
   const [liveLogs, setLiveLogs] = useState<string[]>([]);
   const [logSearchQuery, setLogSearchQuery] = useState<string>("");
   const logContainerRef = useRef<HTMLDivElement>(null);
+  const didInitRef = useRef<boolean>(false);
+  const isSimulatingRef = useRef<boolean>(false);
 
   const filteredLogs = liveLogs.filter(log => 
     log.toLowerCase().includes(logSearchQuery.toLowerCase())
   );
 
-  // Auto-Pilot continuous defense scanner loop
+  // Auto-Pilot continuous defense scanner loop (awaited + accurate status reporting)
   useEffect(() => {
     if (!isAutoPilot) return;
-    const interval = setInterval(() => {
+    let cancelled = false;
+    const interval = setInterval(async () => {
+      if (isSimulatingRef.current) return;
       const randomIdx = Math.floor(Math.random() * ALL_MODULES.length);
       const randomMod = ALL_MODULES[randomIdx];
-      simulateModule(randomMod.id);
-      setLiveLogs(prev => [
-        ...prev,
-        `[${new Date().toLocaleTimeString()}] CHRONOS AUTO-PILOT: Scanned ${randomMod.name} [#${randomMod.id}] - Status Nominal.`
-      ]);
+      const result = await simulateModule(randomMod.id, { openSummaryModal: false });
+      if (!cancelled && result) {
+        setLiveLogs(prev => [
+          ...prev,
+          `[${new Date().toLocaleTimeString()}] CHRONOS AUTO-PILOT: Scanned ${randomMod.name} [#${randomMod.id}] - Status ${result.status}.`
+        ]);
+      }
     }, 5500);
-    return () => clearInterval(interval);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
   }, [isAutoPilot]);
 
-  // Initialize data and triggers
+  // Initialize data and triggers (guarded against React StrictMode double invocation)
   useEffect(() => {
-    // Generate initial security events list
+    if (didInitRef.current) return;
+    didInitRef.current = true;
+
+    const nowTime = new Date().toLocaleTimeString();
+
+    // Hardened baseline security posture events
     const initialEvents: SecurityEvent[] = [
       {
         id: "ev-1",
-        timestamp: "14:42:15",
+        timestamp: nowTime,
         moduleId: 3,
         moduleName: "Quantum Crypto Auditor",
-        severity: "warning",
-        message: "Classical TLS cipher suite detected (AES-GCM-SHA384) without PQ key encapsulation."
+        severity: "info",
+        message: "[REMEDIATED]: Classical ECDHE-RSA fallbacks migrated to NIST ML-KEM-768 & Dilithium-3 across all active gateways."
       },
       {
         id: "ev-2",
-        timestamp: "14:38:02",
+        timestamp: nowTime,
         moduleId: 27,
         moduleName: "Cloud Audit (AWS/Azure/GCP)",
-        severity: "critical",
-        message: "Publicly accessible AWS S3 backup logs identified via external scan posture."
+        severity: "info",
+        message: "[REMEDIATED]: S3 backup buckets locked with Public Access Block + AES-256 KMS; sandbox IAM roles restricted to least privilege."
       },
       {
         id: "ev-3",
-        timestamp: "14:15:30",
+        timestamp: nowTime,
         moduleId: 1,
         moduleName: "Quantum Vulnerability Predictor",
         severity: "info",
-        message: "Ensemble calculations complete. Risk trajectory stabilized."
+        message: "Ensemble calculations complete. Risk trajectory stabilized at hardened baseline (12/100)."
       }
     ];
     setEvents(initialEvents);
@@ -475,9 +522,9 @@ export default function App() {
 
     // Fetch initial blockchain state
     fetchBlockchain();
-    
-    // Automatically trigger initial simulation for first module
-    simulateModule(ALL_MODULES[0].id);
+
+    // Automatically trigger initial simulation for first module without blocking initial viewport with a modal
+    simulateModule(ALL_MODULES[0].id, { openSummaryModal: false });
   }, []);
 
   // Sync log scroll
@@ -520,9 +567,12 @@ export default function App() {
       });
       const data = await res.json();
       if (data.success) {
-        setBlockchain(data.blockchain || []);
+        if (Array.isArray(data.blockchain)) {
+          setBlockchain(data.blockchain);
+        } else if (data.block) {
+          setBlockchain(prev => [...prev, data.block]);
+        }
         setAnchoredBlockHash(data.block.signature);
-        await fetchBlockchain();
         
         // Append on chain audit log
         setLiveLogs(prev => [
@@ -537,29 +587,122 @@ export default function App() {
     }
   };
 
-  // Trigger server-side module simulation
-  const simulateModule = async (moduleId: number) => {
+  // Historical 24h rolling posture baseline (updates gradually after simulation runs)
+  const [baseline24hScores, setBaseline24hScores] = useState<Record<string, number>>({
+    "PQ Crypto": 91,
+    "Zero-Trust": 89,
+    "Detection": 90,
+    "Telemetry": 92,
+    "Ingress SLA": 88,
+    "Supply Chain": 91,
+  });
+
+  // Compute current 6-axis security posture comparison for Radar Chart
+  const postureComparison = useMemo<PostureDimensionPoint[]>(() => {
+    const clamp = (val: number) => Math.max(15, Math.min(100, Number(val.toFixed(1))));
+    const unresolvedWarnings = events.filter((e) => e.severity === "warning").length;
+    const unresolvedCriticals = events.filter((e) => e.severity === "critical").length;
+    const surgingHosts = Object.values(simulatedSurgeNodes).filter(Boolean).length;
+    const throttledHosts = Object.keys(nodeThrottleHistory).length;
+    const statusPenalty =
+      simulationResult?.status === "Critical"
+        ? 16
+        : simulationResult?.status === "Warning"
+        ? 9
+        : 0;
+
+    const currentScores: Record<string, number> = {
+      "PQ Crypto": clamp(
+        96 + Math.min(pqcRotatedCount * 1.2, 4) - unresolvedCriticals * 4 - (simulationResult?.moduleId === 3 || simulationResult?.moduleId === 15 ? statusPenalty : 0)
+      ),
+      "Zero-Trust": clamp(
+        95 - systemRiskScore * 0.18 + Math.min(isolatedNodes.length * 1.5, 4) - unresolvedCriticals * 5
+      ),
+      "Detection": clamp(
+        overallHealth - unresolvedWarnings * 1.5 - statusPenalty * 0.5
+      ),
+      "Telemetry": clamp(
+        93 + Math.min(blockchain.length * 1.1, 7) - unresolvedWarnings * 0.8
+      ),
+      "Ingress SLA": clamp(
+        97 - surgingHosts * 11 + throttledHosts * 4 - unresolvedCriticals * 2
+      ),
+      "Supply Chain": clamp(
+        96 - unresolvedWarnings * 2.5 - unresolvedCriticals * 5 - (simulationResult?.moduleId === 7 || simulationResult?.moduleId === 19 ? statusPenalty : 0)
+      ),
+    };
+
+    const baseline30d: Record<string, number> = {
+      "PQ Crypto": 58,
+      "Zero-Trust": 63,
+      "Detection": 71,
+      "Telemetry": 74,
+      "Ingress SLA": 68,
+      "Supply Chain": 61,
+    };
+
+    return Object.keys(currentScores).map((dimension) => ({
+      dimension,
+      current: currentScores[dimension],
+      baseline24h: baseline24hScores[dimension] ?? 90,
+      baseline30d: baseline30d[dimension] ?? 65,
+      fullMark: 100,
+    }));
+  }, [
+    events,
+    simulatedSurgeNodes,
+    nodeThrottleHistory,
+    simulationResult,
+    pqcRotatedCount,
+    systemRiskScore,
+    isolatedNodes.length,
+    overallHealth,
+    blockchain.length,
+    baseline24hScores,
+  ]);
+
+  // Trigger server-side module simulation with unified local-time normalization
+  const simulateModule = async (
+    moduleId: number,
+    options?: { openSummaryModal?: boolean }
+  ): Promise<SimulationResult | null> => {
+    const shouldOpenSummary = options?.openSummaryModal ?? true;
+    isSimulatingRef.current = true;
     setIsSimulating(true);
     try {
       const res = await fetch(`/api/modules/${moduleId}/simulate`, { method: "POST" });
       const data = await res.json();
       if (data.success && data.result) {
-        setSimulationResult(data.result);
-        
+        const result: SimulationResult = data.result;
+        const localTime = result.timestampIso
+          ? new Date(result.timestampIso).toLocaleTimeString()
+          : new Date().toLocaleTimeString();
+
+        const normalizedLogs = Array.isArray(result.logs)
+          ? result.logs.map((line: string) => line.replace(/^\[[^\]]+\]/, `[${localTime}]`))
+          : [];
+
+        const normalizedResult: SimulationResult = {
+          ...result,
+          logs: normalizedLogs
+        };
+
+        setSimulationResult(normalizedResult);
+
         // Dynamic logs appending
-        if (data.result.logs) {
+        if (normalizedLogs.length > 0) {
           setLiveLogs(prev => [
             ...prev,
             `--- TRIGGER RUN: ${ALL_MODULES.find(m => m.id === moduleId)?.name} ---`,
-            ...data.result.logs
+            ...normalizedLogs
           ]);
         }
 
         // Adjust global states dynamically to represent real interactive analytics
-        if (data.result.status === "Warning") {
+        if (normalizedResult.status === "Warning") {
           setSystemRiskScore(prev => Math.min(prev + 4, 85));
           setOverallHealth(prev => Math.max(prev - 1.2, 74.2));
-        } else if (data.result.status === "Critical") {
+        } else if (normalizedResult.status === "Critical") {
           setSystemRiskScore(prev => Math.min(prev + 9, 98));
           setOverallHealth(prev => Math.max(prev - 4.5, 62.1));
         } else {
@@ -568,23 +711,42 @@ export default function App() {
         }
         setTotalScansCount(prev => prev + 1);
 
-        // Add to dynamic security events stream if not success
-        if (data.result.status !== "Success") {
+        // Add to dynamic security events stream if warning or critical
+        if (normalizedResult.status === "Warning" || normalizedResult.status === "Critical") {
           const newEv: SecurityEvent = {
             id: `ev-${Date.now()}`,
-            timestamp: new Date().toLocaleTimeString(),
+            timestamp: localTime,
             moduleId,
             moduleName: ALL_MODULES.find(m => m.id === moduleId)?.name || "Sentinel Module",
-            severity: data.result.status === "Critical" ? "critical" : "warning",
-            message: data.result.recommendations?.[0] || "Alert threshold trigger run anomaly flagged."
+            severity: normalizedResult.status === "Critical" ? "critical" : "warning",
+            message: normalizedResult.recommendations?.[0] || "Alert threshold trigger run anomaly flagged."
           };
           setEvents(prev => [newEv, ...prev].slice(0, 8));
         }
 
+        if (shouldOpenSummary) {
+          const ranModule = ALL_MODULES.find(m => m.id === moduleId) || activeModule;
+          setExecSummaryModule(ranModule);
+          setIsExecSummaryOpen(true);
+          // Smoothly update rolling 24h baseline slightly behind current run
+          setBaseline24hScores(prev => ({
+            "PQ Crypto": Number((prev["PQ Crypto"] * 0.9 + (normalizedResult.status === "Success" ? 93 : 86) * 0.1).toFixed(1)),
+            "Zero-Trust": Number((prev["Zero-Trust"] * 0.9 + (normalizedResult.status === "Success" ? 92 : 84) * 0.1).toFixed(1)),
+            "Detection": Number((prev["Detection"] * 0.9 + 91 * 0.1).toFixed(1)),
+            "Telemetry": Number((prev["Telemetry"] * 0.9 + 93 * 0.1).toFixed(1)),
+            "Ingress SLA": Number((prev["Ingress SLA"] * 0.9 + 89 * 0.1).toFixed(1)),
+            "Supply Chain": Number((prev["Supply Chain"] * 0.9 + 91 * 0.1).toFixed(1)),
+          }));
+        }
+
+        return normalizedResult;
       }
+      return null;
     } catch (e) {
       console.error("Simulation error: ", e);
+      return null;
     } finally {
+      isSimulatingRef.current = false;
       setIsSimulating(false);
     }
   };
@@ -675,7 +837,7 @@ export default function App() {
   };
 
   // Per-threat target mitigation handler
-  const fixSpecificThreat = (eventId: string, moduleName: string) => {
+  const fixSpecificThreat = (eventId: string, moduleName: string, moduleId?: number) => {
     setEvents(prev => prev.map(ev => {
       if (ev.id === eventId) {
         return {
@@ -694,11 +856,23 @@ export default function App() {
       ...prev,
       `[${new Date().toLocaleTimeString()}] THREAT REMEDIATION: Successfully applied defense patch for ${moduleName} [${eventId}]. State secured.`
     ]);
+
+    fetch("/api/security/remediate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(moduleId ? { moduleId } : {})
+    }).catch(() => {});
   };
 
   // Instant Auto-Mitigation Handler for all threats
   const executeAutoMitigation = () => {
     setIsMitigating(true);
+    fetch("/api/security/remediate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({})
+    }).catch(() => {});
+
     setTimeout(() => {
       setSystemRiskScore(12);
       setOverallHealth(99.4);
@@ -707,7 +881,7 @@ export default function App() {
       setSimulationResult(prev => prev ? {
         ...prev,
         status: "Success",
-        logs: [...(prev.logs || []), "[MITIGATION COMPLETE]: Reconfigured zero-trust policy rules and purged payload caches."],
+        logs: [...(prev.logs || []), `[${new Date().toLocaleTimeString()}] [MITIGATION COMPLETE]: Reconfigured zero-trust policy rules and purged payload caches.`],
         recommendations: ["System state fully stabilized under Post-Quantum Zero-Trust ruleset."]
       } : null);
 
@@ -730,6 +904,16 @@ export default function App() {
       ...prev,
       `[${new Date().toLocaleTimeString()}] PQC MATRIX: Rotated Kyber-768 & Dilithium-3 keypairs across all network ingress points. Batch #${pqcRotatedCount + 1}`
     ]);
+    fetch("/api/security/remediate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ moduleId: 3 })
+    }).catch(() => {});
+    fetch("/api/security/remediate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ moduleId: 15 })
+    }).catch(() => {});
   };
 
   // Threat burst anomaly simulator for the Threat Density Heatmap
@@ -766,6 +950,12 @@ export default function App() {
       ...prev,
       `[${new Date().toLocaleTimeString()}] HEATMAP TELEMETRY: Injected anomaly spike into ${mod.name} [#${mod.id}]. Threat density recalculated.`
     ]);
+
+    fetch("/api/security/inject-anomaly", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ moduleId: mod.id })
+    }).catch(() => {});
   };
 
   // Quick Prompt AI Helper
@@ -1183,11 +1373,27 @@ export default function App() {
                 {/* Displaying Live Simulated Response Telemetry */}
                 {simulationResult ? (
                   <div className="space-y-4 pt-2" id="sim-results-pane">
-                    <div className="flex items-center justify-between" id="result-status-row">
+                    <div className="flex flex-wrap items-center justify-between gap-2" id="result-status-row">
                       <span className="text-xs font-semibold text-slate-400 font-mono">Current Audit Response:</span>
-                      <span className={`text-[11px] font-bold font-mono px-2.5 py-1 border rounded-full uppercase tracking-wider ${getStatusColor(simulationResult.status)}`}>
-                        ● {simulationResult.status}
-                      </span>
+                      <div className="flex items-center gap-2">
+                        <button
+                          id="open-exec-summary-btn"
+                          type="button"
+                          onClick={() => {
+                            const matchedMod =
+                              ALL_MODULES.find((m) => m.id === simulationResult.moduleId) || activeModule;
+                            setExecSummaryModule(matchedMod);
+                            setIsExecSummaryOpen(true);
+                          }}
+                          className="text-[11px] font-mono font-semibold px-2.5 py-1 rounded-md bg-slate-900 hover:bg-slate-800 text-sky-300 border border-slate-700 transition-colors flex items-center space-x-1.5 whitespace-nowrap shrink-0"
+                        >
+                          <TrendingUp className="w-3 h-3 text-sky-400" />
+                          <span>Executive Summary</span>
+                        </button>
+                        <span className={`text-[11px] font-bold font-mono px-2.5 py-1 border rounded-full uppercase tracking-wider ${getStatusColor(simulationResult.status)}`}>
+                          ● {simulationResult.status}
+                        </span>
+                      </div>
                     </div>
 
                     {/* Simulated Metrics widgets */}
@@ -1332,12 +1538,23 @@ export default function App() {
           {/* VIEW TAB 2: INTERACTIVE ATTACK PATH MATRIX GRAPH */}
           {viewTab === "attack-graph" && (
             <div className="bg-slate-950 border border-slate-900 rounded-xl p-5 space-y-4 flex flex-col flex-1" id="attack-path-matrix-card">
-              <div className="flex items-center justify-between border-b border-slate-900 pb-3" id="attack-graph-header">
+              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-900 pb-3" id="attack-graph-header">
                 <div className="flex items-center space-x-2" id="attack-graph-title">
                   <Network className="w-4 h-4 text-blue-500" />
                   <span className="text-xs font-bold uppercase tracking-wider font-mono text-slate-200">Interactive Attack Path Topology</span>
                 </div>
-                <span className="text-[10px] font-mono text-slate-500">GNN Message Passing Enabled</span>
+                <div className="flex items-center space-x-3">
+                  <span className="text-[10px] font-mono text-slate-500 hidden sm:inline">GNN Message Passing Enabled</span>
+                  <button
+                    id="open-node-health-dashboard-btn"
+                    onClick={() => setIsNodeHealthOverlayOpen(true)}
+                    className="px-2.5 py-1 text-[11px] font-mono font-semibold rounded-lg bg-blue-600/20 hover:bg-blue-600/35 text-blue-300 border border-blue-500/50 transition-colors flex items-center space-x-1.5 whitespace-nowrap shrink-0"
+                    title="Open granular CPU, memory, and disk I/O telemetry overlay for the selected node"
+                  >
+                    <Gauge className="w-3.5 h-3.5 text-blue-400" />
+                    <span>Node Health Dashboard</span>
+                  </button>
+                </div>
               </div>
 
               {/* Topology SVG Map */}
@@ -1351,38 +1568,113 @@ export default function App() {
                   <line x1="350" y1="110" x2="440" y2="110" stroke="#ef4444" strokeWidth="2" strokeDasharray="2" />
 
                   {/* Node 1: Ingress Gateway */}
-                  <g className="cursor-pointer" onClick={() => setSelectedNodeId("node-1")}>
-                    <circle cx="80" cy="110" r="18" fill="#0f172a" stroke={selectedNodeId === "node-1" ? "#3b82f6" : "#334155"} strokeWidth="2" />
-                    <text x="80" y="114" textAnchor="middle" fill="#94a3b8" fontSize="9" fontWeight="bold" fontFamily="monospace">GW1</text>
+                  <g
+                    className="cursor-pointer"
+                    onClick={() => setSelectedNodeId("node-1")}
+                    onDoubleClick={() => {
+                      setSelectedNodeId("node-1");
+                      setIsNodeHealthOverlayOpen(true);
+                    }}
+                  >
+                    <circle
+                      cx="80"
+                      cy="110"
+                      r="18"
+                      fill="#0f172a"
+                      stroke={isolatedNodes.includes("node-1") ? "#ef4444" : simulatedSurgeNodes["node-1"] ? "#f43f5e" : selectedNodeId === "node-1" ? "#38bdf8" : "#334155"}
+                      strokeWidth={selectedNodeId === "node-1" ? "3" : "2"}
+                      strokeDasharray={isolatedNodes.includes("node-1") ? "3 2" : undefined}
+                    />
+                    <text x="80" y="114" textAnchor="middle" fill="#cbd5e1" fontSize="9" fontWeight="bold" fontFamily="monospace">GW1</text>
                   </g>
 
                   {/* Node 2: VQC Quantum Core */}
-                  <g className="cursor-pointer" onClick={() => setSelectedNodeId("node-2")}>
-                    <circle cx="200" cy="60" r="18" fill="#0f172a" stroke={selectedNodeId === "node-2" ? "#3b82f6" : "#3b82f6"} strokeWidth="2" />
+                  <g
+                    className="cursor-pointer"
+                    onClick={() => setSelectedNodeId("node-2")}
+                    onDoubleClick={() => {
+                      setSelectedNodeId("node-2");
+                      setIsNodeHealthOverlayOpen(true);
+                    }}
+                  >
+                    <circle
+                      cx="200"
+                      cy="60"
+                      r="18"
+                      fill="#0f172a"
+                      stroke={isolatedNodes.includes("node-2") ? "#ef4444" : simulatedSurgeNodes["node-2"] ? "#f43f5e" : selectedNodeId === "node-2" ? "#60a5fa" : "#2563eb"}
+                      strokeWidth={selectedNodeId === "node-2" ? "3" : "2"}
+                      strokeDasharray={isolatedNodes.includes("node-2") ? "3 2" : undefined}
+                    />
                     <text x="200" y="64" textAnchor="middle" fill="#60a5fa" fontSize="9" fontWeight="bold" fontFamily="monospace">VQC</text>
                   </g>
 
                   {/* Node 3: AWS S3 Bucket */}
-                  <g className="cursor-pointer" onClick={() => setSelectedNodeId("node-3")}>
-                    <circle cx="200" cy="160" r="18" fill="#0f172a" stroke={isolatedNodes.includes("node-3") ? "#ef4444" : (selectedNodeId === "node-3" ? "#f59e0b" : "#d97706")} strokeWidth="2" />
+                  <g
+                    className="cursor-pointer"
+                    onClick={() => setSelectedNodeId("node-3")}
+                    onDoubleClick={() => {
+                      setSelectedNodeId("node-3");
+                      setIsNodeHealthOverlayOpen(true);
+                    }}
+                  >
+                    <circle
+                      cx="200"
+                      cy="160"
+                      r="18"
+                      fill="#0f172a"
+                      stroke={isolatedNodes.includes("node-3") ? "#ef4444" : simulatedSurgeNodes["node-3"] ? "#f43f5e" : selectedNodeId === "node-3" ? "#fbbf24" : "#d97706"}
+                      strokeWidth={selectedNodeId === "node-3" ? "3" : "2"}
+                      strokeDasharray={isolatedNodes.includes("node-3") ? "3 2" : undefined}
+                    />
                     <text x="200" y="164" textAnchor="middle" fill="#fbbf24" fontSize="9" fontWeight="bold" fontFamily="monospace">S3</text>
                   </g>
 
                   {/* Node 4: GNN Pivot Node */}
-                  <g className="cursor-pointer" onClick={() => setSelectedNodeId("node-4")}>
-                    <circle cx="350" cy="110" r="18" fill="#0f172a" stroke={selectedNodeId === "node-4" ? "#10b981" : "#059669"} strokeWidth="2" />
+                  <g
+                    className="cursor-pointer"
+                    onClick={() => setSelectedNodeId("node-4")}
+                    onDoubleClick={() => {
+                      setSelectedNodeId("node-4");
+                      setIsNodeHealthOverlayOpen(true);
+                    }}
+                  >
+                    <circle
+                      cx="350"
+                      cy="110"
+                      r="18"
+                      fill="#0f172a"
+                      stroke={isolatedNodes.includes("node-4") ? "#ef4444" : simulatedSurgeNodes["node-4"] ? "#f43f5e" : selectedNodeId === "node-4" ? "#34d399" : "#059669"}
+                      strokeWidth={selectedNodeId === "node-4" ? "3" : "2"}
+                      strokeDasharray={isolatedNodes.includes("node-4") ? "3 2" : undefined}
+                    />
                     <text x="350" y="114" textAnchor="middle" fill="#34d399" fontSize="9" fontWeight="bold" fontFamily="monospace">GNN</text>
                   </g>
 
                   {/* Node 5: Honeytoken Trap */}
-                  <g className="cursor-pointer" onClick={() => setSelectedNodeId("node-5")}>
-                    <circle cx="440" cy="110" r="14" fill="#0f172a" stroke="#8b5cf6" strokeWidth="2" />
+                  <g
+                    className="cursor-pointer"
+                    onClick={() => setSelectedNodeId("node-5")}
+                    onDoubleClick={() => {
+                      setSelectedNodeId("node-5");
+                      setIsNodeHealthOverlayOpen(true);
+                    }}
+                  >
+                    <circle
+                      cx="440"
+                      cy="110"
+                      r="16"
+                      fill="#0f172a"
+                      stroke={isolatedNodes.includes("node-5") ? "#ef4444" : simulatedSurgeNodes["node-5"] ? "#f43f5e" : selectedNodeId === "node-5" ? "#c084fc" : "#8b5cf6"}
+                      strokeWidth={selectedNodeId === "node-5" ? "3" : "2"}
+                      strokeDasharray={isolatedNodes.includes("node-5") ? "3 2" : undefined}
+                    />
                     <text x="440" y="113" textAnchor="middle" fill="#a78bfa" fontSize="8" fontFamily="monospace">HONEY</text>
                   </g>
                 </svg>
 
                 <div className="absolute bottom-2 left-2 text-[9px] font-mono text-slate-500 bg-slate-950/80 px-2 py-1 rounded border border-slate-900">
-                  Click nodes to view risk parameters & isolation state
+                  Click node to inspect · Double-click to open Node Health Dashboard
                 </div>
               </div>
 
@@ -1440,6 +1732,17 @@ export default function App() {
                       </div>
 
                       <div className="flex flex-wrap items-center gap-2">
+                        {/* Node Health Dashboard Overlay Trigger */}
+                        <button
+                          id="node-health-overlay-btn"
+                          onClick={() => setIsNodeHealthOverlayOpen(true)}
+                          className="px-2.5 py-1 text-xs font-mono rounded flex items-center space-x-1.5 transition-all border font-semibold bg-blue-600/20 text-blue-300 border-blue-500/60 hover:bg-blue-600/35"
+                          title="Open Node Health Dashboard overlay for CPU, memory, and disk I/O telemetry"
+                        >
+                          <Activity className="w-3.5 h-3.5 text-blue-400" />
+                          <span>Health Telemetry</span>
+                        </button>
+
                         {/* Auto-Throttle Button (programmatically reduces node traffic limit by 50% during surge and logs action to terminal) */}
                         <button
                           id="auto-throttle-btn"
@@ -1475,16 +1778,7 @@ export default function App() {
                         {/* Simulate Traffic Spike Toggle (Internal Check Trigger) */}
                         <button
                           id="simulate-traffic-surge-btn"
-                          onClick={() => {
-                            setSimulatedSurgeNodes(prev => ({
-                              ...prev,
-                              [activeHostId]: !prev[activeHostId]
-                            }));
-                            setLiveLogs(prev => [
-                              ...prev,
-                              `[${new Date().toLocaleTimeString()}] SIMULATION: Toggled ingress surge pattern on ${activeHost.id} (${!isHostSurging ? 'SURGE ACTIVE' : 'SURGE CEASED'}).`
-                            ]);
-                          }}
+                          onClick={() => handleToggleSurge(activeHostId)}
                           className={`px-2.5 py-1 text-xs font-mono rounded flex items-center space-x-1.5 transition-all border ${
                             isHostSurging 
                               ? "bg-rose-950/80 text-rose-300 border-rose-700 hover:bg-rose-900 shadow-[0_0_10px_rgba(244,63,94,0.4)]" 
@@ -1500,15 +1794,7 @@ export default function App() {
                         {selectedNodeId && (
                           <button
                             id="isolate-node-toggle-btn"
-                            onClick={() => {
-                              setIsolatedNodes(prev => 
-                                prev.includes(selectedNodeId) ? prev.filter(id => id !== selectedNodeId) : [...prev, selectedNodeId]
-                              );
-                              setLiveLogs(prev => [
-                                ...prev,
-                                `[${new Date().toLocaleTimeString()}] NETWORK: Toggled isolation posture for ${selectedNodeId}.`
-                              ]);
-                            }}
+                            onClick={() => handleToggleIsolate(selectedNodeId)}
                             className={`px-3 py-1 text-xs font-semibold rounded font-mono transition-all border ${
                               isHostIsolated 
                                 ? "bg-emerald-950 text-emerald-400 border-emerald-900 hover:bg-emerald-900" 
@@ -1890,6 +2176,16 @@ export default function App() {
                   </div>
                 );
               })()}
+
+              {/* D3-Force Dependency Relationship Map */}
+              <DependencyRelationshipMap
+                selectedNodeId={selectedNodeId || "node-1"}
+                onSelectNode={(id) => setSelectedNodeId(id)}
+                isolatedNodes={isolatedNodes}
+                simulatedSurgeNodes={simulatedSurgeNodes}
+                throttledNodes={nodeThrottleHistory}
+                hostNodes={HOST_NODES}
+              />
             </div>
           )}
 
@@ -2022,7 +2318,7 @@ export default function App() {
                     {ev.severity !== "info" ? (
                       <button
                         id={`fix-threat-btn-${ev.id}`}
-                        onClick={() => fixSpecificThreat(ev.id, ev.moduleName)}
+                        onClick={() => fixSpecificThreat(ev.id, ev.moduleName, ev.moduleId)}
                         className="px-2.5 py-1 text-[10px] font-mono font-semibold bg-blue-600 hover:bg-blue-500 text-white rounded shrink-0 transition-all shadow-sm flex items-center space-x-1"
                       >
                         <ShieldCheck className="w-3 h-3" />
@@ -2230,6 +2526,42 @@ export default function App() {
         <span id="footer-copyright">Quantum Sentinel AI Platform. Complies fully with ISO-27001, PQ-TLS NIST Standards (FIPS 203/204/205).</span>
         <span id="footer-time">System Time (Local): {new Date().toLocaleTimeString()}</span>
       </footer>
+
+      {/* Node Health Dashboard Overlay */}
+      <NodeHealthDashboardOverlay
+        isOpen={isNodeHealthOverlayOpen}
+        onClose={() => setIsNodeHealthOverlayOpen(false)}
+        selectedNodeId={selectedNodeId || "node-1"}
+        onSelectNode={(id) => setSelectedNodeId(id)}
+        hostNodes={HOST_NODES}
+        nodeUptimes={nodeUptimes}
+        nodeLatencies={nodeLatencies}
+        nodeTrafficRates={nodeTrafficRates}
+        nodeTrafficLimits={nodeTrafficLimits}
+        simulatedSurgeNodes={simulatedSurgeNodes}
+        isolatedNodes={isolatedNodes}
+        throttledNodes={nodeThrottleHistory}
+        onAutoThrottle={handleAutoThrottle}
+        onResetThrottle={handleResetThrottle}
+        onToggleSurge={handleToggleSurge}
+        onToggleIsolate={handleToggleIsolate}
+        onLogAction={(msg) => setLiveLogs(prev => [...prev, msg])}
+      />
+
+      {/* Executive Simulation Summary Modal */}
+      <ExecutiveSimulationSummaryModal
+        isOpen={isExecSummaryOpen}
+        onClose={() => setIsExecSummaryOpen(false)}
+        module={execSummaryModule || activeModule}
+        simulationResult={simulationResult}
+        postureComparison={postureComparison}
+        systemRiskScore={systemRiskScore}
+        overallHealth={overallHealth}
+        blockchainHeight={blockchain.length}
+        isMitigating={isMitigating}
+        onExecuteMitigation={executeAutoMitigation}
+        onAnchorReport={anchorCurrentReport}
+      />
     </div>
   );
 }

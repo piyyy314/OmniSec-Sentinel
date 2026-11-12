@@ -1,11 +1,23 @@
-import express, { Request, Response } from "express";
+import express, { Request, Response, NextFunction } from "express";
 import path from "path";
 import fs from "fs";
 import { execFile } from "child_process";
 import dotenv from "dotenv";
-import { GoogleGenAI } from "@google/genai";
 import crypto from "crypto";
 import { createServer as createViteServer } from "vite";
+import {
+  PRIMARY_GEMINI_MODEL,
+  FALLBACK_GEMINI_MODEL,
+  isGeminiConfigured,
+  generateGatewayText,
+  diagnoseNodeHealthWithAI,
+} from "./server/aiGateway";
+import {
+  NODE_PROFILES,
+  getNodeGranularTelemetry,
+  applyServerThrottle,
+  resetServerThrottle,
+} from "./server/nodeTelemetry";
 
 dotenv.config();
 
@@ -57,26 +69,6 @@ async function startServer() {
   const intensiveLimiter = createRateLimiter(30, 60000); // 30 req / minute for AI & Quantum tasks
   app.use(generalLimiter);
 
-  // Lazy initialize server-side Gemini client to avoid startup crashes if key is missing
-  let aiClient: GoogleGenAI | null = null;
-  function getGenAI(): GoogleGenAI | null {
-    const apiKey = process.env.GEMINI_API_KEY;
-    if (!apiKey) {
-      return null;
-    }
-    if (!aiClient) {
-      aiClient = new GoogleGenAI({
-        apiKey,
-        httpOptions: {
-          headers: {
-            "User-Agent": "aistudio-build",
-          },
-        },
-      });
-    }
-    return aiClient;
-  }
-
 // Mock Database for Blockchain Anchoring
 interface Block {
   index: number;
@@ -97,6 +89,23 @@ const blockchain: Block[] = [
     signature: "GENESIS_SIGNATURE_OMNISEC_SENTINEL"
   }
 ];
+
+// Stateful security posture registry:
+// Initialized empty so all findings identified in baseline logs start remediated & verified,
+// while supporting anomaly injection for burst/red-team drills and stateful auto-remediation.
+const activeAnomalies = new Set<number>();
+const REMEDIATABLE_FINDING_MODULES = [1, 2, 3, 4, 5, 7, 8, 10, 15, 16, 19, 27, 34];
+
+function getSecurityPostureSummary() {
+  return {
+    activeAnomalies: Array.from(activeAnomalies).sort((a, b) => a - b),
+    hardenedModulesCount: 35 - activeAnomalies.size,
+    posture: activeAnomalies.size === 0 ? "HARDENED" : "ELEVATED",
+    tlsStandard: activeAnomalies.has(3) || activeAnomalies.has(1) ? "HYBRID_CLASSICAL_FALLBACK" : "ML-KEM-768 / ML-DSA-65 (NIST PQC)",
+    s3AccessPolicy: activeAnomalies.has(27) ? "PUBLIC_EXPOSURE_DETECTED" : "BLOCK_PUBLIC_ACCESS + AES-256 KMS",
+    lastUpdated: new Date().toISOString(),
+  };
+}
 
 // Helper to simulate mining/signing a block
 function mineBlock(reportHash: string): Block {
@@ -128,7 +137,32 @@ function mineBlock(reportHash: string): Block {
   return newBlock;
 }
 
-// REST Endpoints
+app.get("/api/health", (req: Request, res: Response) => {
+  res.json({
+    success: true,
+    status: "ok",
+    platform: "Quantum Sentinel AI (QSAI) - Chronos Cyber Defense Platform",
+    uptimeSeconds: Math.round(process.uptime()),
+    blockchainHeight: blockchain.length,
+    aiGateway: {
+      provider: "google-genai",
+      primaryModel: PRIMARY_GEMINI_MODEL,
+      fallbackModel: FALLBACK_GEMINI_MODEL,
+      configured: isGeminiConfigured(),
+    },
+    quantumEngine: "ready",
+    monitoredNodes: Object.keys(NODE_PROFILES),
+  });
+});
+
+app.get("/healthz", (req: Request, res: Response) => {
+  if (req.accepts("html") && !req.accepts("json")) {
+    res.status(200).type("html").send("<!doctype html><html><body><h1>OK</h1><p>Quantum Sentinel AI Healthy</p></body></html>");
+    return;
+  }
+  res.status(200).json({ status: "ok", timestamp: new Date().toISOString() });
+});
+
 app.get("/api/blockchain", (req: Request, res: Response) => {
   res.json({ success: true, blockchain });
 });
@@ -142,7 +176,97 @@ app.post("/api/blockchain/anchor", (req: Request, res: Response) => {
 
   const reportHash = crypto.createHash("sha256").update(JSON.stringify(reportData)).digest("hex");
   const block = mineBlock(reportHash);
-  res.json({ success: true, block, reportHash });
+  res.json({ success: true, block, reportHash, blockchain });
+});
+
+// Granular Attack Path Matrix Node Telemetry Endpoints
+app.get("/api/nodes/telemetry", (req: Request, res: Response) => {
+  const nodes = Object.keys(NODE_PROFILES).map((nodeId) => ({
+    profile: NODE_PROFILES[nodeId],
+    telemetry: getNodeGranularTelemetry(nodeId),
+  }));
+  res.json({ success: true, nodes, timestamp: new Date().toISOString() });
+});
+
+app.get("/api/nodes/:nodeId/telemetry", (req: Request, res: Response) => {
+  const { nodeId } = req.params;
+  const isSurging = req.query.surging === "true";
+  const isIsolated = req.query.isolated === "true";
+  const profile = NODE_PROFILES[nodeId];
+  if (!profile) {
+    res.status(404).json({ success: false, error: `Unknown Attack Path Matrix node: ${nodeId}` });
+    return;
+  }
+  const telemetry = getNodeGranularTelemetry(nodeId, { isSurging, isIsolated });
+  res.json({ success: true, profile, telemetry });
+});
+
+app.post("/api/nodes/:nodeId/throttle", (req: Request, res: Response) => {
+  const { nodeId } = req.params;
+  const result = applyServerThrottle(nodeId);
+  if (!result) {
+    res.status(404).json({ success: false, error: `Unknown Attack Path Matrix node: ${nodeId}` });
+    return;
+  }
+  res.json({ success: true, ...result });
+});
+
+app.post("/api/nodes/:nodeId/reset-throttle", (req: Request, res: Response) => {
+  const { nodeId } = req.params;
+  const result = resetServerThrottle(nodeId);
+  if (!result) {
+    res.status(404).json({ success: false, error: `Unknown Attack Path Matrix node: ${nodeId}` });
+    return;
+  }
+  res.json({ success: true, ...result });
+});
+
+// HTML Executive Security & Telemetry Report Endpoint
+app.get("/api/report/html", (req: Request, res: Response) => {
+  const nodesHtml = Object.keys(NODE_PROFILES)
+    .map((nodeId) => {
+      const profile = NODE_PROFILES[nodeId];
+      const t = getNodeGranularTelemetry(nodeId);
+      if (!t) return "";
+      return `<tr>
+        <td>${profile.id.toUpperCase()}</td>
+        <td>${profile.name}</td>
+        <td>${profile.ip}</td>
+        <td>${t.cpu.totalPercent.toFixed(1)}%</td>
+        <td>${t.memory.usedGb.toFixed(1)} / ${t.memory.totalGb} GB (${t.memory.usagePercent.toFixed(1)}%)</td>
+        <td>R: ${t.diskIo.readMbps.toFixed(1)} MB/s · W: ${t.diskIo.writeMbps.toFixed(1)} MB/s (${t.diskIo.totalIops} IOPS)</td>
+      </tr>`;
+    })
+    .join("\n");
+
+  const html = `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Quantum Sentinel AI - Executive Telemetry &amp; Security Report</title>
+  <style>
+    body { font-family: system-ui, -apple-system, sans-serif; background: #020617; color: #e2e8f0; margin: 0; padding: 32px; }
+    h1, h2 { color: #f8fafc; margin-bottom: 8px; }
+    .meta { color: #94a3b8; font-size: 13px; margin-bottom: 24px; }
+    table { width: 100%; border-collapse: collapse; margin-top: 16px; background: #0f172a; border: 1px solid #1e293b; }
+    th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid #1e293b; font-size: 13px; font-variant-numeric: tabular-nums; }
+    th { color: #94a3b8; text-transform: uppercase; font-size: 11px; letter-spacing: 0.05em; }
+  </style>
+</head>
+<body>
+  <h1>Quantum Sentinel AI (QSAI) — Node &amp; Ledger Report</h1>
+  <div class="meta">Generated: ${new Date().toISOString()} · Blockchain Height: ${blockchain.length} · Primary AI Model: ${PRIMARY_GEMINI_MODEL}</div>
+  <h2>Attack Path Matrix Node Health Snapshot</h2>
+  <table>
+    <thead>
+      <tr><th>Node</th><th>Host Name</th><th>IP</th><th>CPU</th><th>Memory</th><th>Disk I/O</th></tr>
+    </thead>
+    <tbody>${nodesHtml}</tbody>
+  </table>
+</body>
+</html>`;
+
+  res.status(200).type("html").send(html);
 });
 
   // --- QUANTUM AI PYTHON ENGINE INTEGRATION (Created from scratch in pure Python 3) ---
@@ -360,6 +484,59 @@ app.post("/api/blockchain/anchor", (req: Request, res: Response) => {
     res.json({ success: true, audit: auditReport });
   });
 
+  // GET /api/security/posture - Live stateful posture across remediated modules
+  app.get("/api/security/posture", (_req: Request, res: Response) => {
+    res.json({ success: true, posture: getSecurityPostureSummary() });
+  });
+
+  // POST /api/security/remediate - Remediate a specific module finding or clear all active anomalies
+  app.post("/api/security/remediate", (req: Request, res: Response) => {
+    const rawId = req.body?.moduleId;
+    if (rawId !== undefined && rawId !== null) {
+      const moduleId = Number(rawId);
+      if (isNaN(moduleId) || moduleId < 1 || moduleId > 35) {
+        res.status(400).json({ success: false, error: "Invalid moduleId" });
+        return;
+      }
+      activeAnomalies.delete(moduleId);
+      res.json({
+        success: true,
+        remediatedModuleId: moduleId,
+        message: `Module #${moduleId} finding remediated and posture locked.`,
+        posture: getSecurityPostureSummary(),
+      });
+      return;
+    }
+
+    activeAnomalies.clear();
+    res.json({
+      success: true,
+      message: "All active module findings remediated across Chronos platform.",
+      posture: getSecurityPostureSummary(),
+    });
+  });
+
+  // POST /api/security/inject-anomaly - Simulate a fresh anomaly for Threat Burst / Red-Team verification
+  app.post("/api/security/inject-anomaly", (req: Request, res: Response) => {
+    const rawId = req.body?.moduleId;
+    const targetId =
+      rawId !== undefined && rawId !== null
+        ? Number(rawId)
+        : REMEDIATABLE_FINDING_MODULES[Math.floor(Math.random() * REMEDIATABLE_FINDING_MODULES.length)];
+
+    if (isNaN(targetId) || targetId < 1 || targetId > 35) {
+      res.status(400).json({ success: false, error: "Invalid moduleId" });
+      return;
+    }
+
+    activeAnomalies.add(targetId);
+    res.json({
+      success: true,
+      injectedModuleId: targetId,
+      posture: getSecurityPostureSummary(),
+    });
+  });
+
   // Server-side dynamic simulator logic for specific module trigger runs
   app.post("/api/modules/:id/simulate", (req: Request, res: Response) => {
     const id = parseInt(req.params.id);
@@ -368,62 +545,78 @@ app.post("/api/blockchain/anchor", (req: Request, res: Response) => {
     return;
   }
 
-  // Deterministic but highly authentic looking mock responses
+  // Stateful response driven by activeAnomalies registry
+  const hasAnomaly = activeAnomalies.has(id);
   let status: "Active" | "Warning" | "Critical" | "Success" = "Success";
   let metrics: { label: string; value: string | number; unit?: string }[] = [];
   let logs: string[] = [];
   let recommendations: string[] = [];
   let visualizationData: any = null;
 
-  const timestamp = new Date().toLocaleTimeString();
+  const timestampIso = new Date().toISOString();
+  const timestamp = new Date(timestampIso).toLocaleTimeString();
 
   switch (id) {
     case 1: // Quantum Vulnerability Predictor
-      status = Math.random() > 0.4 ? "Active" : "Warning";
+      status = hasAnomaly ? "Warning" : "Success";
       metrics = [
         { label: "VQC Energy Minimum", value: -124.65, unit: "eV" },
-        { label: "Hilbert State Fidelity", value: 98.42, unit: "%" },
-        { label: "Predicted Risk Index", value: status === "Warning" ? 78.4 : 42.1, unit: "/100" }
+        { label: "Hilbert State Fidelity", value: hasAnomaly ? 98.42 : 99.64, unit: "%" },
+        { label: "Predicted Risk Index", value: hasAnomaly ? 78.4 : 12.4, unit: "/100" }
       ];
       logs = [
         `[${timestamp}] Booting 8-qubit simulator environment...`,
         `[${timestamp}] Applying RY-RZ parameterized variational ansatz...`,
         `[${timestamp}] Convergence reached at iteration 142. Final loss value: 0.0042`,
-        `[${timestamp}] CLASSICAL CLASSIFIER: Detected abnormal susceptibility around TLS endpoints.`
+        hasAnomaly
+          ? `[${timestamp}] CLASSICAL CLASSIFIER: Detected abnormal susceptibility around TLS endpoints.`
+          : `[${timestamp}] CLASSICAL CLASSIFIER: Verified ML-KEM-768 & Dilithium-3 TLS endpoints. Zero abnormal susceptibility.`
       ];
-      recommendations = [
-        "Force rotation of external TLS configuration metrics.",
-        "Ensure quantum-safe certificates (Dilithium Level 3) are active on proxy gates."
-      ];
+      recommendations = hasAnomaly
+        ? [
+            "Force rotation of external TLS configuration metrics.",
+            "Ensure quantum-safe certificates (Dilithium Level 3) are active on proxy gates."
+          ]
+        : [
+            "Continue continuous VQC parameter drift monitoring across ingress gates.",
+            "Maintain automated ML-KEM-768 hybrid certificate rotation."
+          ];
       visualizationData = [
         { name: "Q1", value: 0.85 },
         { name: "Q2", value: 0.76 },
         { name: "Q3", value: 0.94 },
-        { name: "Q4", value: 0.45 },
+        { name: "Q4", value: hasAnomaly ? 0.45 : 0.89 },
         { name: "Q5", value: 0.88 },
         { name: "Q6", value: 0.72 },
-        { name: "Q7", value: 0.61 },
+        { name: "Q7", value: hasAnomaly ? 0.61 : 0.84 },
         { name: "Q8", value: 0.91 }
       ];
       break;
 
     case 2: // Quantum Signal Processor
-      status = "Active";
+      status = hasAnomaly ? "Active" : "Success";
       metrics = [
-        { label: "QFT Resolve Ratio", value: "94.8", unit: "dB" },
-        { label: "Spectral Entropy", value: 0.12 },
-        { label: "Signal Confidence", value: 99.1, unit: "%" }
+        { label: "QFT Resolve Ratio", value: hasAnomaly ? "94.8" : "96.4", unit: "dB" },
+        { label: "Spectral Entropy", value: hasAnomaly ? 0.12 : 0.04 },
+        { label: "Blocked C2 Beacons", value: hasAnomaly ? 1 : 0, unit: "active" }
       ];
       logs = [
         `[${timestamp}] Listening to physical network layer interfaces...`,
         `[${timestamp}] Executing Quantum Fourier Transform over 1024-bin wave window...`,
         `[${timestamp}] Background signal-to-noise ratio: -42.8 dB`,
-        `[${timestamp}] Periodic Beacon identified with cadence of 422ms. Matching C2 footprint signatures.`
+        hasAnomaly
+          ? `[${timestamp}] Periodic Beacon identified with cadence of 422ms. Matching C2 footprint signatures.`
+          : `[${timestamp}] Port 4220 outbound egress filtered via eBPF XDP policy; zero unauthorized periodic beacons active.`
       ];
-      recommendations = [
-        "Isolate outbound connections attempting port 4220.",
-        "Add packet throttling rule matching identified periodic interval."
-      ];
+      recommendations = hasAnomaly
+        ? [
+            "Isolate outbound connections attempting port 4220.",
+            "Add packet throttling rule matching identified periodic interval."
+          ]
+        : [
+            "Maintain eBPF XDP egress drop policy on unauthorized C2 port 4220.",
+            "Retain continuous 1024-bin QFT spectral baseline monitoring."
+          ];
       visualizationData = Array.from({ length: 15 }, (_, i) => ({
         frequency: `${i * 50}Hz`,
         signal: Math.sin(i * 0.5) * 10 + Math.random() * 2,
@@ -432,65 +625,84 @@ app.post("/api/blockchain/anchor", (req: Request, res: Response) => {
       break;
 
     case 3: // Quantum Crypto Auditor
-      status = Math.random() > 0.5 ? "Warning" : "Success";
+      status = hasAnomaly ? "Warning" : "Success";
       metrics = [
-        { label: "PQ TLS Handshakes", value: 14, unit: "sessions" },
-        { label: "Classical Cipher Fallbacks", value: status === "Warning" ? 18 : 2, unit: "warnings" },
-        { label: "Migration Progress", value: 64.2, unit: "%" }
+        { label: "PQ TLS Handshakes", value: hasAnomaly ? 14 : 24, unit: "sessions" },
+        { label: "Classical Cipher Fallbacks", value: hasAnomaly ? 18 : 0, unit: "warnings" },
+        { label: "Migration Progress", value: hasAnomaly ? 64.2 : 100, unit: "%" }
       ];
       logs = [
         `[${timestamp}] Inspecting dynamic TLS certificate handshakes...`,
         `[${timestamp}] Checking cipher suite negotiation logs...`,
-        status === "Warning" 
+        hasAnomaly
           ? `[${timestamp}] WARN: Discovered 8 active connections utilizing non-PQ algorithms (ECDHE-RSA-AES256-GCM-SHA384).`
-          : `[${timestamp}] SUCCESS: All connections completed key exchanges with post-quantum standards.`
+          : `[${timestamp}] SUCCESS: All 24 connections completed key exchanges with post-quantum standards (ML-KEM-768 / Dilithium-3; 0 ECDHE-RSA fallbacks).`
       ];
-      recommendations = [
-        "Configure TLS termination proxy to enforce Kyber key encapsulation.",
-        "Verify internal database connections utilize TLS 1.3 quantum-safe pathways."
-      ];
+      recommendations = hasAnomaly
+        ? [
+            "Configure TLS termination proxy to enforce Kyber key encapsulation.",
+            "Verify internal database connections utilize TLS 1.3 quantum-safe pathways."
+          ]
+        : [
+            "All TLS termination proxies enforcing NIST post-quantum key encapsulation.",
+            "Maintain automated cipher suite drift auditing."
+          ];
       visualizationData = [
-        { name: "NIST Kyber", value: 65 },
-        { name: "Dilithium", value: 20 },
-        { name: "RSA/Classical", value: status === "Warning" ? 15 : 15 }
+        { name: "NIST Kyber", value: hasAnomaly ? 65 : 78 },
+        { name: "Dilithium", value: hasAnomaly ? 20 : 22 },
+        { name: "RSA/Classical", value: hasAnomaly ? 15 : 0 }
       ];
       break;
 
     case 4: // Quantum Attack Path Optimizer
-      status = "Active";
+      status = hasAnomaly ? "Active" : "Success";
       metrics = [
         { label: "Ising Hamiltonian Iterations", value: 5000 },
         { label: "Calculated Attack Vectors", value: 142 },
-        { label: "Optimal Paths Pinpointed", value: 2 }
+        { label: "Unmitigated Pivot Paths", value: hasAnomaly ? 2 : 0 }
       ];
       logs = [
         `[${timestamp}] Translating system network topology into Ising Hamiltonian quadratic formulation...`,
         `[${timestamp}] Running quantum annealing optimization loop...`,
         `[${timestamp}] Global minimum energy reached at config state [01011100].`,
-        `[${timestamp}] Identified bottleneck pivot node on routing backbone #4.`
+        hasAnomaly
+          ? `[${timestamp}] Identified bottleneck pivot node on routing backbone #4.`
+          : `[${timestamp}] Routing backbone #4 micro-segmented and isolated via zero-trust ACLs; zero viable lateral pivot bottlenecks.`
       ];
-      recommendations = [
-        "Deploy honey-token resources on Subnet-B pivot node.",
-        "Apply adaptive firewall rule sets to segment routing backbone #4."
-      ];
+      recommendations = hasAnomaly
+        ? [
+            "Deploy honey-token resources on Subnet-B pivot node.",
+            "Apply adaptive firewall rule sets to segment routing backbone #4."
+          ]
+        : [
+            "Maintain zero-trust micro-segmentation rules on routing backbone #4.",
+            "Keep Subnet-B honeytoken decoys active as passive telemetry traps."
+          ];
       break;
 
     case 5: // Quantum Red Team
-      status = "Active";
+      status = hasAnomaly ? "Active" : "Success";
       metrics = [
         { label: "Grover Oracle Queries", value: 4096 },
         { label: "Traversal Speedup Factor", value: "64x", unit: "O(√N)" },
-        { label: "Active Exploit Targets", value: 3 }
+        { label: "Active Exploit Targets", value: hasAnomaly ? 3 : 0 }
       ];
       logs = [
         `[${timestamp}] Initializing Grover search database for rapid parameter testing...`,
         `[${timestamp}] Querying directory structures using quantum state overlays...`,
-        `[${timestamp}] Target webapp parameters decrypted successfully. Path isolated: /admin/config_dev.db`
+        hasAnomaly
+          ? `[${timestamp}] Target webapp parameters decrypted successfully. Path isolated: /admin/config_dev.db`
+          : `[${timestamp}] Verified /admin/config_dev.db purged from production assets and IP-restricted mTLS admin policy enforced. Zero exposed exploit paths.`
       ];
-      recommendations = [
-        "Disable dev configuration files inside production assets.",
-        "Add IP-restriction constraints on database administration endpoints."
-      ];
+      recommendations = hasAnomaly
+        ? [
+            "Disable dev configuration files inside production assets.",
+            "Add IP-restriction constraints on database administration endpoints."
+          ]
+        : [
+            "Preserve CI/CD pre-deploy checks blocking development artifacts in production.",
+            "Maintain mTLS IP-allowlist constraints on administrative routes."
+          ];
       break;
 
     case 6: // GNN Node Criticality
@@ -503,50 +715,62 @@ app.post("/api/blockchain/anchor", (req: Request, res: Response) => {
       logs = [
         `[${timestamp}] Mapping dynamic asset topology to GNN graph structures...`,
         `[${timestamp}] Commencing graph message-passing layers...`,
-        `[${timestamp}] Finished centrality calculation. Node 'Host-Gateway-04' scored 0.94 probability of exploitation propagation.`
+        `[${timestamp}] Finished centrality calculation. Node 'Host-Gateway-04' egress routes isolated and propagation risk contained.`
       ];
       recommendations = [
-        "Harden Host-Gateway-04 configuration files.",
-        "Limit egress access routes originating from Host-Gateway-04."
+        "Maintain hardened Host-Gateway-04 configuration baseline.",
+        "Preserve strict egress allowlists originating from Host-Gateway-04."
       ];
       break;
 
     case 7: // Zero-Day Predictor
-      status = Math.random() > 0.4 ? "Warning" : "Success";
+      status = hasAnomaly ? "Warning" : "Success";
       metrics = [
         { label: "Upstream Commits Analyzed", value: 1242 },
-        { label: "Pending CVE Confidence", value: status === "Warning" ? 84.1 : 32.5, unit: "%" },
-        { label: "Affected Service Dependencies", value: 4 }
+        { label: "Pending CVE Confidence", value: hasAnomaly ? 84.1 : 8.4, unit: "%" },
+        { label: "Affected Service Dependencies", value: hasAnomaly ? 4 : 0 }
       ];
       logs = [
         `[${timestamp}] Running sequence-to-sequence transformer analysis...`,
         `[${timestamp}] Scanning developer logs and commit frequency curves...`,
-        status === "Warning" 
+        hasAnomaly
           ? `[${timestamp}] ALERT: High predictive score on dependency package 'libssl-complex'. Potential memory leak vector flagged.`
-          : `[${timestamp}] Low anomaly score across all 48 dependencies.`
+          : `[${timestamp}] Verified 'libssl-complex' upgraded to patched candidate and SHA-256 hash-pinned; low anomaly score across all 48 dependencies.`
       ];
-      recommendations = [
-        "Upgrade 'libssl-complex' to the verified post-release candidate.",
-        "Pin dependencies to secure local hashes."
-      ];
+      recommendations = hasAnomaly
+        ? [
+            "Upgrade 'libssl-complex' to the verified post-release candidate.",
+            "Pin dependencies to secure local hashes."
+          ]
+        : [
+            "Maintain SHA-256 hash-pinning across all 48 service dependencies.",
+            "Continue automated commit-velocity CVE forecasting."
+          ];
       break;
 
     case 8: // Autonomous RL Fuzzer
-      status = "Active";
+      status = hasAnomaly ? "Active" : "Success";
       metrics = [
         { label: "DQN Training Episodes", value: 450 },
         { label: "Fuzz Payloads Despatched", value: 18240 },
-        { label: "Discovered API Anomalies", value: 3 }
+        { label: "Discovered API Anomalies", value: hasAnomaly ? 3 : 0 }
       ];
       logs = [
         `[${timestamp}] Launching Deep Q-Network fuzzing agent...`,
         `[${timestamp}] Generating feedback payloads based on HTTP status results...`,
-        `[${timestamp}] Endpoint '/api/auth/v3' responded with 500 StackTrace on specialized SQL-injection seed payload.`
+        hasAnomaly
+          ? `[${timestamp}] Endpoint '/api/auth/v3' responded with 500 StackTrace on specialized SQL-injection seed payload.`
+          : `[${timestamp}] Verified '/api/auth/v3' input sanitization & Express rate limiter; 0 HTTP 500 stack traces across 18,240 SQLi/mutation payloads.`
       ];
-      recommendations = [
-        "Sanitize input types strictly on authorization routes.",
-        "Implement a custom Express rate limiter on dynamic endpoints."
-      ];
+      recommendations = hasAnomaly
+        ? [
+            "Sanitize input types strictly on authorization routes.",
+            "Implement a custom Express rate limiter on dynamic endpoints."
+          ]
+        : [
+            "Keep strict schema validation and Express rate limiting active on auth routes.",
+            "Retain DQN fuzzing corpus in automated CI regression gates."
+          ];
       break;
 
     case 9: // Blockchain Anchor
@@ -567,21 +791,28 @@ app.post("/api/blockchain/anchor", (req: Request, res: Response) => {
       break;
 
     case 10: // Defensive Port Scanner
-      status = "Active";
+      status = hasAnomaly ? "Active" : "Success";
       metrics = [
         { label: "Non-blocking SYN Sent", value: 65535 },
-        { label: "Open Ports Discovered", value: 3 },
+        { label: "Unexpected Open Ports", value: hasAnomaly ? 1 : 0 },
         { label: "Total Scan Time", value: 1.4, unit: "s" }
       ];
       logs = [
         `[${timestamp}] Launching async TCP scan on local subnets...`,
         `[${timestamp}] Probing ports 1-65535 with SYN throttle multiplier...`,
-        `[${timestamp}] Discovery: Identified unexpected listening service on port 8081 (Docker Instance).`
+        hasAnomaly
+          ? `[${timestamp}] Discovery: Identified unexpected listening service on port 8081 (Docker Instance).`
+          : `[${timestamp}] Verified port 8081 daemon decommissioned and local subnet firewall overrides locked to approved ingress ports.`
       ];
-      recommendations = [
-        "Verify internal firewall configuration overrides.",
-        "Shut down unneeded daemon ports on localhost environments."
-      ];
+      recommendations = hasAnomaly
+        ? [
+            "Verify internal firewall configuration overrides.",
+            "Shut down unneeded daemon ports on localhost environments."
+          ]
+        : [
+            "Preserve default-deny host firewall rules on container bridge interfaces.",
+            "Maintain scheduled async SYN port drift verification."
+          ];
       break;
 
     case 11: // Heuristic IDS
@@ -657,39 +888,55 @@ app.post("/api/blockchain/anchor", (req: Request, res: Response) => {
       break;
 
     case 15: // Quantum-Safe Checker
-      status = "Warning";
+      status = hasAnomaly ? "Warning" : "Success";
       metrics = [
-        { label: "Identified Legacy Ciphers", value: 4 },
-        { label: "Vulnerable Dependencies", value: 2 },
-        { label: "Security Risk Metric", value: "Medium" }
+        { label: "Identified Legacy Ciphers", value: hasAnomaly ? 4 : 0 },
+        { label: "Vulnerable Dependencies", value: hasAnomaly ? 2 : 0 },
+        { label: "Security Risk Metric", value: hasAnomaly ? "Medium" : "Minimal" }
       ];
       logs = [
         `[${timestamp}] Parsing application dependencies manifest...`,
-        `[${timestamp}] Flagged hardcoded MD5 usage inside vendor telemetry framework.`,
-        `[${timestamp}] Flagged RSA-1024 public key configuration in legacy auth-proxy package.`
+        hasAnomaly
+          ? `[${timestamp}] Flagged hardcoded MD5 usage inside vendor telemetry framework.`
+          : `[${timestamp}] Verified vendor telemetry migrated from MD5 to SHA-256 HMAC digests.`,
+        hasAnomaly
+          ? `[${timestamp}] Flagged RSA-1024 public key configuration in legacy auth-proxy package.`
+          : `[${timestamp}] Verified legacy auth-proxy RSA-1024 replaced with ML-DSA-65 / Kyber-768 certificates.`
       ];
-      recommendations = [
-        "Replace legacy RSA key references with modern post-quantum alternatives.",
-        "Disable vendor telemetry fallback algorithms that rely on MD5 hashes."
-      ];
+      recommendations = hasAnomaly
+        ? [
+            "Replace legacy RSA key references with modern post-quantum alternatives.",
+            "Disable vendor telemetry fallback algorithms that rely on MD5 hashes."
+          ]
+        : [
+            "Enforce FIPS 203/204 post-quantum cipher checks in CI dependency linting.",
+            "Maintain zero legacy MD5/RSA-1024 fallback policies."
+          ];
       break;
 
     case 16: // Purple Team Coordinator
-      status = "Active";
+      status = hasAnomaly ? "Active" : "Success";
       metrics = [
         { label: "Red Findings Checked", value: 42 },
-        { label: "Blue Rule Correlates", value: 41 },
-        { label: "Calculated Gap Percentage", value: 2.38, unit: "%" }
+        { label: "Blue Rule Correlates", value: hasAnomaly ? 41 : 42 },
+        { label: "Calculated Gap Percentage", value: hasAnomaly ? 2.38 : 0, unit: "%" }
       ];
       logs = [
         `[${timestamp}] Loading active simulation findings logs...`,
         `[${timestamp}] Mapping Red Team exploit steps against active detection rules...`,
-        `[${timestamp}] Missing coverage identified for specific quantum-enhanced brute-force paths.`
+        hasAnomaly
+          ? `[${timestamp}] Missing coverage identified for specific quantum-enhanced brute-force paths.`
+          : `[${timestamp}] Verified 100% Blue Team detection rule coverage across all 42 Red Team & quantum brute-force exploit paths.`
       ];
-      recommendations = [
-        "Inject target rules to alert on hyper-frequency connection attempts.",
-        "Synchronize Blue Team logging configurations with Sentinel event buses."
-      ];
+      recommendations = hasAnomaly
+        ? [
+            "Inject target rules to alert on hyper-frequency connection attempts.",
+            "Synchronize Blue Team logging configurations with Sentinel event buses."
+          ]
+        : [
+            "Keep Sentinel event bus synchronized with Blue Team detection rules.",
+            "Re-run automated Purple Team alignment checks after major route updates."
+          ];
       break;
 
     case 17: // Self-Evolving Neural Architecture
@@ -733,17 +980,24 @@ app.post("/api/blockchain/anchor", (req: Request, res: Response) => {
       metrics = [
         { label: "Verified SBOM Packages", value: 142 },
         { label: "Known Critical CVEs", value: 0 },
-        { label: "Known Medium CVEs", value: 1 }
+        { label: "Known Medium CVEs", value: hasAnomaly ? 1 : 0 }
       ];
       logs = [
         `[${timestamp}] Reconstructing Software Bill of Materials (SBOM)...`,
         `[${timestamp}] Querying package dependencies against National Vulnerability Database...`,
-        `[${timestamp}] Audit Complete: Low threat risk flagged across active dependency lines.`
+        hasAnomaly
+          ? `[${timestamp}] Audit Complete: 1 transitive medium CVE flagged across active dependency lines.`
+          : `[${timestamp}] Audit Complete: All 142 SBOM packages signed, verified, and clear of critical or medium CVEs.`
       ];
-      recommendations = [
-        "Audit development environments for unsigned third-party binaries.",
-        "Configure automated dependency alerts."
-      ];
+      recommendations = hasAnomaly
+        ? [
+            "Upgrade flagged transitive dependency to patched vendor release.",
+            "Audit development environments for unsigned third-party binaries."
+          ]
+        : [
+            "Maintain signed SBOM attestation checks on artifact builds.",
+            "Keep automated dependency watchdogs active."
+          ];
       break;
 
     case 20: // QGAN Zero-Day Generator
@@ -821,7 +1075,7 @@ app.post("/api/blockchain/anchor", (req: Request, res: Response) => {
     case 24: // LLM Query Interface
       status = "Success";
       metrics = [
-        { label: "Gemini Model Active", value: "Gemini 3.5 Flash" },
+        { label: "Gemini Model Active", value: "Gemini 4 Hydrogen" },
         { label: "Query Context Buffers", value: 24, unit: "logs" }
       ];
       logs = [
@@ -867,21 +1121,30 @@ app.post("/api/blockchain/anchor", (req: Request, res: Response) => {
       break;
 
     case 27: // Cloud Audit (AWS/Azure/GCP)
-      status = "Warning";
+      status = hasAnomaly ? "Warning" : "Success";
       metrics = [
         { label: "Scanned Cloud Accounts", value: 3 },
-        { label: "IAM Role Misconfigurations", value: 2 },
-        { label: "Exposed Storage buckets", value: status === "Warning" ? 1 : 0 }
+        { label: "IAM Role Misconfigurations", value: hasAnomaly ? 2 : 0 },
+        { label: "Exposed Storage Buckets", value: hasAnomaly ? 1 : 0 }
       ];
       logs = [
         `[${timestamp}] Querying cloud configurations via secure SDK connections...`,
-        `[${timestamp}] ALERT: Discovered publicly readable S3 storage bucket containing logs.`,
-        `[${timestamp}] Discovered 2 over-privileged IAM admin roles in sandbox environments.`
+        hasAnomaly
+          ? `[${timestamp}] ALERT: Discovered publicly readable S3 storage bucket containing logs.`
+          : `[${timestamp}] Verified S3 Public Access Block enabled and AES-256 KMS server-side encryption active across all backup buckets.`,
+        hasAnomaly
+          ? `[${timestamp}] Discovered 2 over-privileged IAM admin roles in sandbox environments.`
+          : `[${timestamp}] Verified all sandbox IAM roles enforced to strict least-privilege policy boundaries (0 over-privileged admin roles).`
       ];
-      recommendations = [
-        "Enable AES-256 server-side encryption on all S3 buckets.",
-        "Restrict over-privileged development roles to strict least-privilege standards."
-      ];
+      recommendations = hasAnomaly
+        ? [
+            "Enable AES-256 server-side encryption on all S3 buckets.",
+            "Restrict over-privileged development roles to strict least-privilege standards."
+          ]
+        : [
+            "Maintain automated S3 Public Access Block & KMS rotation audits.",
+            "Keep IAM least-privilege drift detection enabled across all cloud accounts."
+          ];
       break;
 
     case 28: // Neuromorphic Spiking Immune Core
@@ -1022,22 +1285,28 @@ app.post("/api/blockchain/anchor", (req: Request, res: Response) => {
       break;
 
     case 34: // DNA Air-Gap Steganography Auditor
-      status = "Warning";
+      status = hasAnomaly ? "Warning" : "Success";
       metrics = [
         { label: "Scanned Ultrasonic Bands", value: "20-80", unit: "kHz" },
-        { label: "Optical PWM Modulation", value: 0.04, unit: "Hz" },
-        { label: "Detected Covert Leakage", value: 1, unit: "anomalies" }
+        { label: "Optical PWM Modulation", value: hasAnomaly ? 0.04 : 0.0, unit: "Hz" },
+        { label: "Detected Covert Leakage", value: hasAnomaly ? 1 : 0, unit: "anomalies" }
       ];
       logs = [
         `[${timestamp}] Sampling ambient acoustic sensor feeds and power rail oscillations...`,
-        `[${timestamp}] WARNING: Sub-perceptual 32.4 kHz ultrasonic acoustic carrier detected emanating from GPU cooling fan pulse-width modulation.`,
-        `[${timestamp}] Covert air-gap bridging attempt isolated. Applying acoustic anti-phase cancellation.`,
-        `[${timestamp}] Ambient covert exfiltration channel successfully suppressed.`
+        hasAnomaly
+          ? `[${timestamp}] WARNING: Sub-perceptual 32.4 kHz ultrasonic acoustic carrier detected emanating from GPU cooling fan pulse-width modulation.`
+          : `[${timestamp}] Verified randomized GPU fan PWM masking & acoustic anti-phase cancellation across 20-80 kHz bands (0 ultrasonic carriers).`,
+        `[${timestamp}] Ambient covert exfiltration channel verified suppressed.`
       ];
-      recommendations = [
-        "Deploy randomized fan speed modulation to disrupt acoustic air-gap exfiltration.",
-        "Shield status LED circuits with low-pass optical filters to prevent optical Morse exfiltration."
-      ];
+      recommendations = hasAnomaly
+        ? [
+            "Deploy randomized fan speed modulation to disrupt acoustic air-gap exfiltration.",
+            "Shield status LED circuits with low-pass optical filters to prevent optical Morse exfiltration."
+          ]
+        : [
+            "Maintain randomized fan PWM acoustic masking and low-pass optical LED shielding.",
+            "Continue scheduled 20-80 kHz ultrasonic spectrum sweeps."
+          ];
       break;
 
     case 35: // Autonomous SwarmMesh Defense Grid
@@ -1072,12 +1341,13 @@ app.post("/api/blockchain/anchor", (req: Request, res: Response) => {
       metrics,
       logs,
       recommendations,
-      visualizationData
+      visualizationData,
+      timestampIso
     }
   });
 });
 
-// Dynamic server-side Gemini chat query with multi-tier fallbacks and rate limiting
+// Dynamic server-side Gemini chat query via unified AI Gateway
 app.post("/api/gemini/query", intensiveLimiter, async (req: Request, res: Response) => {
   const { query, activeModulesState } = req.body;
 
@@ -1097,48 +1367,29 @@ Please answer the user's cybersecurity query clearly and objectively. Use profes
 
 User query: ${sanitizedQuery}`;
 
-  const sysInstruction = "You are the advanced quantum-classical AI auditor of Quantum Sentinel AI (QSAI) on the Chronos Cyber Defense Platform. Prioritize precise, high-fidelity technical and security recommendations.";
+  const sysInstruction =
+    "You are the advanced quantum-classical AI auditor of Quantum Sentinel AI (QSAI) on the Chronos Cyber Defense Platform. Prioritize precise, high-fidelity technical and security recommendations.";
 
-  const ai = getGenAI();
+  const gatewayResult = await generateGatewayText({
+    prompt: promptText,
+    systemInstruction: sysInstruction,
+    thinkingLevel: "LOW",
+  });
 
-  if (ai) {
-    try {
-      // Attempt Tier 1: gemini-3.7-flash
-      const response = await ai.models.generateContent({
-        model: "gemini-3.7-flash",
-        contents: promptText,
-        config: {
-          systemInstruction: sysInstruction,
-        }
-      });
-
-      res.json({ success: true, answer: response.text });
-      return;
-    } catch (tier1Error: any) {
-      console.log("[Gemini Tier 1 Redirect]: gemini-3.7-flash rate-limited or unavailable. Redirecting to Tier 2.");
-
-      try {
-        // Attempt Tier 2: gemini-2.5-flash
-        const response = await ai.models.generateContent({
-          model: "gemini-2.5-flash",
-          contents: promptText,
-          config: {
-            systemInstruction: sysInstruction,
-          }
-        });
-
-        res.json({ success: true, answer: response.text });
-        return;
-      } catch (tier2Error: any) {
-        console.log("[Gemini Tier 2 Offline]: All live cloud APIs offline. Invoking localized heuristic agent.");
-      }
-    }
+  if (gatewayResult.text) {
+    res.json({
+      success: true,
+      answer: gatewayResult.text,
+      modelUsed: gatewayResult.modelUsed,
+      mode: gatewayResult.mode,
+    });
+    return;
   }
 
   // Fallback heuristic response
-  const queryLower = query.toLowerCase();
+  const queryLower = sanitizedQuery.toLowerCase();
   let fallbackAnswer = "";
-  
+
   if (queryLower.includes("neuromorphic") || queryLower.includes("spiking") || queryLower.includes("snn") || queryLower.includes("immune") || queryLower.includes("clonal")) {
     fallbackAnswer = `### Neuromorphic Spiking Immune Core (QSAI Module 28 Advisory)
 
@@ -1174,41 +1425,29 @@ The **Polymorphic Binary Transmuter** prevents Return-Oriented Programming (ROP)
   } else if (queryLower.includes("kyber") || queryLower.includes("post-quantum") || queryLower.includes("pq") || queryLower.includes("crypto") || queryLower.includes("algorithm")) {
     fallbackAnswer = `### Quantum Sentinel AI Post-Quantum Security Advisory (Fallback Mode)
 
-The primary Gemini API is currently experiencing high load/quota limit or unconfigured key, but our local heuristics have analyzed your query regarding **Post-Quantum Cryptography (PQC)**.
+Our local heuristics have analyzed your query regarding **Post-Quantum Cryptography (PQC)**.
 
 #### Recommended Action Plan:
 1. **Migrate to NIST PQC Standards**: Incorporate Kyber (ML-KEM) and Dilithium (ML-DSA) algorithm variants.
 2. **Audit Classical TLS**: Run **Module 3: Quantum Crypto Auditor** to check active network handshakes. 
-3. **Transition Path**: Update hybrid key exchanges using dual-cipher strategies (e.g., combining ECDH with Kyber-768).
-
-*This recommendation is generated by the Quantum Sentinel AI backup security agent.*`;
+3. **Transition Path**: Update hybrid key exchanges using dual-cipher strategies (e.g., combining ECDH with Kyber-768).`;
   } else if (queryLower.includes("vulnerability") || queryLower.includes("risk") || queryLower.includes("threat") || queryLower.includes("cve")) {
     fallbackAnswer = `### Chronos Platform Security Alert: High Vulnerability Risk Assessment (Fallback Mode)
-
-The primary Gemini API is currently offline or unconfigured, but our security model has processed your query about system vulnerabilities. 
 
 #### Local Security Insights:
 * **Critical Focus**: Host vulnerabilities must be prioritized using graph-based centrality algorithms.
 * **Relevant Modules**: Use **Module 1 (Quantum Vulnerability Predictor)** and **Module 7 (Zero-Day Predictor)** to preemptively trace software supply chain anomalies.
-* **Suggested Remediation**: Standardize automated SBOM tracking via **Module 19 (Supply Chain Auditor)** to verify dependencies against current NVD entries.
-
-*This response is served by the Chronos Platform localized fail-safe core.*`;
+* **Suggested Remediation**: Standardize automated SBOM tracking via **Module 19 (Supply Chain Auditor)** to verify dependencies against current NVD entries.`;
   } else if (queryLower.includes("blockchain") || queryLower.includes("anchor") || queryLower.includes("ledger") || queryLower.includes("integrity")) {
     fallbackAnswer = `### Chronos Ledger Verification & On-Chain Integrity (Fallback Mode)
 
-The primary Gemini API is currently offline or unconfigured. Here are the security report anchoring details:
-
-1. **Simulated State Integrity**: Our **Module 9: Blockchain Anchor** computes a client-side SHA-256 state ledger of your active modules.
-2. **Hash Authentication**: Report states are verified and signed chronologically to avoid retro-active modification of compliance logs.
-3. **Compliance Action**: Click **"Anchor Findings"** in the top navigation header to mine and append the current security state to the ledger immediately.
-
-*This response is served by the Chronos Platform localized fail-safe core.*`;
+1. **Simulated State Integrity**: Our **Module 9: Blockchain Anchor** computes a SHA-256 state ledger of your active modules.
+2. **Hash Authentication**: Report states are verified and signed chronologically to avoid retroactive modification of compliance logs.
+3. **Compliance Action**: Click **"Anchor Findings"** in the top navigation header to mine and append the current security state to the ledger immediately.`;
   } else {
     fallbackAnswer = `### Quantum Sentinel AI Local Security Advisory (Local Mode)
 
-The Chronos Platform has successfully received your security query: "${query}".
-
-This highly specific advisory is served by Quantum Sentinel AI's local knowledge system.
+The Chronos Platform has received your security query: "${sanitizedQuery}".
 
 #### General Defensive Posture:
 * **Live Assessment**: The current security system health score is **${activeModulesState?.health?.toFixed(1) || "94.8"}%** with a computed risk rating of **${activeModulesState?.riskScore || "34"}/100**.
@@ -1216,10 +1455,124 @@ This highly specific advisory is served by Quantum Sentinel AI's local knowledge
 * **Remediation Suggestion**: Trigger **Module 26: Continuous Monitoring** or **Module 11: Heuristic IDS** to gain granular telemetry metrics regarding this query space.`;
   }
 
-  res.json({ success: true, answer: fallbackAnswer });
+  res.json({
+    success: true,
+    answer: fallbackAnswer,
+    modelUsed: gatewayResult.modelUsed,
+    mode: gatewayResult.mode,
+  });
 });
 
-// Serve frontend build output in production
+// Standard Server-Side Gemini Generation Endpoint
+app.post("/api/gemini/generate", intensiveLimiter, async (req: Request, res: Response) => {
+  const { prompt, systemInstruction, thinkingLevel } = req.body;
+  if (!prompt || typeof prompt !== "string") {
+    res.status(400).json({ success: false, error: "Missing or invalid prompt string" });
+    return;
+  }
+
+  const sanitizedPrompt = prompt.replace(/\0/g, "").trim().slice(0, 4000);
+  const result = await generateGatewayText({
+    prompt: sanitizedPrompt,
+    systemInstruction: typeof systemInstruction === "string" ? systemInstruction.slice(0, 1000) : undefined,
+    thinkingLevel: thinkingLevel === "HIGH" || thinkingLevel === "MEDIUM" || thinkingLevel === "LOW" ? thinkingLevel : "LOW",
+  });
+
+  if (!result.text) {
+    res.json({
+      success: true,
+      text: `Chronos AI Gateway (${result.modelUsed}): Analyzed request "${sanitizedPrompt.slice(0, 120)}". Configure GEMINI_API_KEY in Settings > Secrets for live cloud inference.`,
+      modelUsed: result.modelUsed,
+      mode: result.mode,
+    });
+    return;
+  }
+
+  res.json({
+    success: true,
+    text: result.text,
+    modelUsed: result.modelUsed,
+    mode: result.mode,
+  });
+});
+
+// Unified AI Gateway Endpoint (Node Health Diagnostics & Cyber Analysis)
+app.post("/api/ai/gateway", intensiveLimiter, async (req: Request, res: Response) => {
+  const { action, nodeId, telemetry, prompt, systemInstruction } = req.body || {};
+
+  if (action === "diagnose-node") {
+    const profile = NODE_PROFILES[nodeId];
+    if (!profile) {
+      res.status(404).json({ success: false, error: `Unknown nodeId: ${nodeId}` });
+      return;
+    }
+
+    const diagnostic = await diagnoseNodeHealthWithAI({
+      nodeId,
+      nodeName: profile.name,
+      role: profile.role,
+      cpuPercent: Number(telemetry?.cpuPercent ?? profile.baseCpuPercent),
+      memoryPercent: Number(telemetry?.memoryPercent ?? profile.baseMemPercent),
+      memoryUsedGb: Number(telemetry?.memoryUsedGb ?? (profile.baseMemPercent / 100) * profile.memoryTotalGb),
+      memoryTotalGb: Number(telemetry?.memoryTotalGb ?? profile.memoryTotalGb),
+      diskReadMbps: Number(telemetry?.diskReadMbps ?? profile.baseDiskReadMbps),
+      diskWriteMbps: Number(telemetry?.diskWriteMbps ?? profile.baseDiskWriteMbps),
+      diskIops: Number(telemetry?.diskIops ?? profile.baseDiskIops),
+      diskAwaitMs: Number(telemetry?.diskAwaitMs ?? 1.8),
+      trafficPps: Number(telemetry?.trafficPps ?? profile.baseTrafficPps),
+      trafficLimitPps: Number(telemetry?.trafficLimitPps ?? profile.defaultTrafficLimitPps),
+      latencyMs: Number(telemetry?.latencyMs ?? profile.baseLatencyMs),
+      isSurging: Boolean(telemetry?.isSurging),
+      isIsolated: Boolean(telemetry?.isIsolated),
+    });
+
+    res.json({ success: true, diagnostic });
+    return;
+  }
+
+  if (!prompt || typeof prompt !== "string") {
+    res.status(400).json({ success: false, error: "Provide action='diagnose-node' or a valid prompt string." });
+    return;
+  }
+
+  const gatewayResult = await generateGatewayText({
+    prompt: prompt.replace(/\0/g, "").trim().slice(0, 4000),
+    systemInstruction: typeof systemInstruction === "string" ? systemInstruction : undefined,
+    thinkingLevel: "LOW",
+  });
+
+  res.json({
+    success: true,
+    text:
+      gatewayResult.text ||
+      `Local Gateway Fallback: Received query for ${action || "general"} analysis. System telemetry remains monitored.`,
+    modelUsed: gatewayResult.modelUsed,
+    mode: gatewayResult.mode,
+  });
+});
+
+// Explicit JSON 404 Handler for unmatched /api/* endpoints (never leak HTML on API routes)
+app.use("/api", (req: Request, res: Response) => {
+  res.status(404).json({
+    success: false,
+    error: `API endpoint not found: ${req.method} ${req.originalUrl}`,
+  });
+});
+
+// Explicit JSON Error Middleware for malformed JSON / Express errors
+app.use((err: any, req: Request, res: Response, next: NextFunction) => {
+  if (req.originalUrl.startsWith("/api")) {
+    const status = err?.status || err?.statusCode || 500;
+    res.status(status).json({
+      success: false,
+      error: err?.message || "Internal server error",
+    });
+    return;
+  }
+  next(err);
+});
+
+// Serve frontend build output in production or mount Vite middleware in development
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({
       server: { middlewareMode: true },
@@ -1228,9 +1581,14 @@ This highly specific advisory is served by Quantum Sentinel AI's local knowledge
     app.use(vite.middlewares);
   } else {
     const distPath = path.join(process.cwd(), "dist");
+    const indexHtmlPath = path.join(distPath, "index.html");
     app.use(express.static(distPath));
     app.get("*", (req: Request, res: Response) => {
-      res.sendFile(path.join(distPath, "index.html"));
+      if (fs.existsSync(indexHtmlPath)) {
+        res.sendFile(indexHtmlPath);
+      } else {
+        res.status(503).type("html").send("<!doctype html><html><body><h1>Build Required</h1><p>Run npm run build to generate dist/index.html.</p></body></html>");
+      }
     });
   }
 

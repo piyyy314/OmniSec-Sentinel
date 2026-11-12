@@ -72,6 +72,7 @@ export const QuantumAIPythonWorkspace: React.FC<QuantumAIPythonWorkspaceProps> =
   const [auditLoading, setAuditLoading] = useState<boolean>(false);
   const [selfTestResult, setSelfTestResult] = useState<any>(null);
   const [testingRunning, setTestingRunning] = useState<boolean>(false);
+  const [executionError, setExecutionError] = useState<string | null>(null);
 
   // Parameter states for VQC
   const [vqcQubits, setVqcQubits] = useState<number>(4);
@@ -182,6 +183,7 @@ export const QuantumAIPythonWorkspace: React.FC<QuantumAIPythonWorkspaceProps> =
     }
 
     try {
+      setExecutionError(null);
       const response = await fetch("/api/quantum-ai/run", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -194,11 +196,11 @@ export const QuantumAIPythonWorkspace: React.FC<QuantumAIPythonWorkspaceProps> =
           `[${new Date().toLocaleTimeString()}] QUANTUM AI PYTHON CORE: Executed ${data.result.module} in ${data.result.execution_duration_ms}ms with zero third-party dependencies.`
         );
       } else {
-        alert(data.error || "Execution failed");
+        setExecutionError(data.error || "Execution failed");
       }
     } catch (err: any) {
       console.error("Quantum module execution failed:", err);
-      alert(`Quantum execution error: ${err.message}`);
+      setExecutionError(`Quantum execution error: ${err.message}`);
     } finally {
       setIsRunning(false);
     }
@@ -313,6 +315,22 @@ export const QuantumAIPythonWorkspace: React.FC<QuantumAIPythonWorkspaceProps> =
             <button
               onClick={() => setSelfTestResult(null)}
               className="text-slate-400 hover:text-slate-200 text-[11px] self-end sm:self-center"
+            >
+              Dismiss
+            </button>
+          </div>
+        )}
+
+        {/* Inline Execution Error Banner */}
+        {executionError && (
+          <div className="mt-3 p-3 bg-rose-950/50 border border-rose-800/80 rounded-lg text-xs font-mono flex items-center justify-between gap-2 text-rose-200">
+            <div className="flex items-center space-x-2">
+              <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0" />
+              <span>{executionError}</span>
+            </div>
+            <button
+              onClick={() => setExecutionError(null)}
+              className="text-rose-300 hover:text-white text-[11px] shrink-0"
             >
               Dismiss
             </button>
